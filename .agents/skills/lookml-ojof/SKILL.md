@@ -1,10 +1,6 @@
 ---
 name: lookml-ojof
 description: Design, build, refactor, and optimize multi-fact LookML Explores using the Outer Join On False (OJOF) pattern. Eliminates cartesian fanouts, chasm traps, and symmetric aggregate overhead across disparate data grains.
-license: Apache-2.0
-metadata:
-  publisher: google
-  version: v1
 ---
 
 # LookML OJOF (Outer Join On False) Skill
