@@ -7,12 +7,6 @@ view: codim_date {
     sql: TRUE ;;
   }
 
-  sql_table_name: COALESCE(
-    {% if orders._in_query %} CAST(orders.o_orderdate AS TIMESTAMP), {% endif %}
-    {% if lineitem._in_query %} CAST(lineitem.l_shipdate AS TIMESTAMP), {% endif %}
-    CAST(NULL AS TIMESTAMP)
-  ) ;;
-
   dimension_group: date {
     type: time
     timeframes: [raw, date, week, month, quarter, year, day_of_week, day_of_month, month_name]

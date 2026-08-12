@@ -99,9 +99,35 @@ view: lineitem {
     sql: ${TABLE}.l_receiptdate ;;
   }
 
+  dimension: is_late_delivery {
+    type: yesno
+    description: "Whether the receipt date was after the committed delivery date"
+    sql: ${TABLE}.l_receiptdate > ${TABLE}.l_commitdate ;;
+  }
+
+  dimension: is_returned {
+    type: yesno
+    description: "Whether the line item was marked as returned"
+    sql: ${TABLE}.l_returnflag = 'R' ;;
+  }
+
   measure: count {
     type: count
     drill_fields: [order_key, line_number, quantity, extended_price, ship_mode]
+  }
+
+  measure: count_late_deliveries {
+    type: count
+    description: "Count of line items received past the committed delivery date"
+    filters: [is_late_delivery: "yes"]
+    drill_fields: [order_key, line_number, ship_date_date, commit_date_date, receipt_date_date]
+  }
+
+  measure: count_returned_items {
+    type: count
+    description: "Count of line items returned by customers"
+    filters: [is_returned: "yes"]
+    drill_fields: [order_key, line_number, quantity, extended_price, return_flag]
   }
 
   measure: total_quantity {
@@ -125,6 +151,14 @@ view: lineitem {
     type: sum
     value_format_name: usd
     sql: ${TABLE}.l_extendedprice * (1 - ${TABLE}.l_discount) * (1 + ${TABLE}.l_tax) ;;
+  }
+
+  measure: total_returned_charge {
+    type: sum
+    value_format_name: usd
+    description: "Total charge value of returned line items"
+    sql: ${TABLE}.l_extendedprice * (1 - ${TABLE}.l_discount) * (1 + ${TABLE}.l_tax) ;;
+    filters: [is_returned: "yes"]
   }
 
   measure: average_discount {

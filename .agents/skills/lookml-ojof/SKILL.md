@@ -186,10 +186,56 @@ explore: +multi_fact_unified {
 
 ---
 
-## 5. Checklist for Agents
+## 5. Multi-Event & Milestone Dates (Role-Playing Facts)
+
+When an entity lifecycle contains multiple event dates (e.g. Sales Opportunities with `created_date` and `closed_date`), grouping by `created_date` breaks measures like "Opportunities Closed" because it only counts deals created in that same timeframe.
+
+**OJOF Solution**: Model each lifecycle milestone as a separate peer fact alias joined `FULL OUTER` on `FALSE`, binding each milestone timestamp into `codim_date`:
+
+```lookml
+explore: sales_pipeline {
+  from: none
+
+  # Milestone Fact 1: Creation Event
+  join: opps_created {
+    from: opportunities
+    type: full_outer
+    relationship: one_to_one
+    sql_on: FALSE ;;
+  }
+
+  # Milestone Fact 2: Closing Event
+  join: opps_closed {
+    from: opportunities
+    type: full_outer
+    relationship: one_to_one
+    sql_on: FALSE ;;
+  }
+
+  # Unified Co-Dimension Date binds each milestone to the common calendar
+  join: codim_date {
+    view_label: "[Activity Date]"
+    type: cross
+    relationship: one_to_one
+    sql_table_name: UNNEST([COALESCE(
+      {% if opps_created._in_query %} CAST(opps_created.created_date AS TIMESTAMP), {% endif %}
+      {% if opps_closed._in_query  %} CAST(opps_closed.closed_date AS TIMESTAMP),  {% endif %}
+      CAST(NULL AS TIMESTAMP)
+    )]) ;;
+  }
+}
+```
+
+This allows querying a single calendar dimension (e.g., `codim_date.date_month`) alongside `opps_created.count` and `opps_closed.count` simultaneously without row fanout or cross-filtering interference.
+
+---
+
+## 6. Checklist for Agents
 
 - [ ] `from: none` base view is 0 rows (`UNNEST([])` or `WHERE 1=0`).
 - [ ] Every fact join is `type: full_outer`, `relationship: one_to_one`, `sql_on: FALSE ;;`.
+- [ ] Multi-event milestones on a single lifecycle entity use aliased peer fact joins.
 - [ ] Shared dimensions use `COALESCE` with `{% if <fact>._in_query %}`.
 - [ ] Co-dimension dates are cross-joined with `UNNEST([${codim_date.SQL_TABLE_NAME}])`.
 - [ ] Aggregate tables use the co-dimension date field in rollup queries.
+

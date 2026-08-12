@@ -2,26 +2,36 @@ include: "/examples/tpch_sf1/views/*.view.lkml"
 
 explore: tpch_unified {
   label: "TPC-H Unified (OJOF Multi-Fact)"
-  description: "Multi-fact explore combining Orders, Lineitem, and PartSupp over Outer Join On False without fanout."
+  description: "Multi-fact explore combining Orders, Shipped Line Items, Received Line Items, and PartSupp over Outer Join On False without fanout."
   from: none
 
-  # Fact 1: Orders (Grain: 1 row per order)
+  # Fact 1: Orders Placed (Grain: 1 row per order placed)
   join: orders {
-    view_label: "Orders"
+    view_label: "Orders (Placed)"
     type: full_outer
     relationship: one_to_one
     sql_on: FALSE ;;
   }
 
-  # Fact 2: Line Items (Grain: 1 row per order line)
-  join: lineitem {
-    view_label: "Line Items"
+  # Milestone Fact 2: Line Items Shipped (Grain: 1 row per order line shipped)
+  join: lineitem_shipped {
+    from: lineitem
+    view_label: "Line Items (Shipped)"
     type: full_outer
     relationship: one_to_one
     sql_on: FALSE ;;
   }
 
-  # Fact 3: Part Supplier / Inventory (Grain: 1 row per part-supplier)
+  # Milestone Fact 3: Line Items Received (Grain: 1 row per order line received)
+  join: lineitem_received {
+    from: lineitem
+    view_label: "Line Items (Received)"
+    type: full_outer
+    relationship: one_to_one
+    sql_on: FALSE ;;
+  }
+
+  # Fact 4: Part Supplier / Inventory (Grain: 1 row per part-supplier)
   join: partsupp {
     view_label: "Part Supplier (Inventory)"
     type: full_outer
@@ -46,7 +56,8 @@ explore: tpch_unified {
     type: left_outer
     relationship: many_to_one
     sql_on: ${part.part_key} = COALESCE(
-      {% if lineitem._in_query %} ${lineitem.part_key}, {% endif %}
+      {% if lineitem_shipped._in_query %} ${lineitem_shipped.part_key}, {% endif %}
+      {% if lineitem_received._in_query %} ${lineitem_received.part_key}, {% endif %}
       {% if partsupp._in_query %} ${partsupp.part_key}, {% endif %}
       NULL
     ) ;;
@@ -58,7 +69,8 @@ explore: tpch_unified {
     type: left_outer
     relationship: many_to_one
     sql_on: ${supplier.supp_key} = COALESCE(
-      {% if lineitem._in_query %} ${lineitem.supp_key}, {% endif %}
+      {% if lineitem_shipped._in_query %} ${lineitem_shipped.supp_key}, {% endif %}
+      {% if lineitem_received._in_query %} ${lineitem_received.supp_key}, {% endif %}
       {% if partsupp._in_query %} ${partsupp.supp_key}, {% endif %}
       NULL
     ) ;;
@@ -84,11 +96,16 @@ explore: tpch_unified {
     sql_on: ${region.region_key} = ${nation.region_key} ;;
   }
 
-  # Co-dimension: Date (Cross-joined UNNEST of coalesced timestamp expression)
+  # Co-dimension: Date (Cross-joined UNNEST of coalesced timestamp expression across milestones)
   join: codim_date {
     view_label: "Activity Date"
     type: cross
     relationship: one_to_one
-    sql_table_name: UNNEST([${codim_date.SQL_TABLE_NAME}]) ;;
+    sql_table_name: UNNEST([COALESCE(
+      {% if orders._in_query %} CAST(orders.o_orderdate AS TIMESTAMP), {% endif %}
+      {% if lineitem_shipped._in_query %} CAST(lineitem_shipped.l_shipdate AS TIMESTAMP), {% endif %}
+      {% if lineitem_received._in_query %} CAST(lineitem_received.l_receiptdate AS TIMESTAMP), {% endif %}
+      CAST(NULL AS TIMESTAMP)
+    )]) ;;
   }
 }

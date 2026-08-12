@@ -9,3 +9,5 @@ persist_with: tpch_default_datagroup
 
 include: "/examples/tpch_sf1/explores/*.explore.lkml"
 include: "/examples/tpch_sf1/tpch.aa.lkml"
+include: "/examples/tpch_sf1/tests/*.test.lkml"
+
