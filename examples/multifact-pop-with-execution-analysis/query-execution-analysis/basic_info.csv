@@ -1,0 +1,2 @@
+,  Minute,Error Result,Is Cache Hit? (Yes / No),Looker History ID,Looker User ID,Total Delay to Start Time (s),Total Runtime (s),Processed GiB,Total Slot ms
+1,2026-08-14 22:56,null,No,7c1f97d141cea08d73509f438ec06ad6,2924,0.1,5.7,5.7  GiB,"621,820"

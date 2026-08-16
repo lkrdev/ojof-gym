@@ -1,0 +1,54 @@
+,Query Text
+1,"WITH none AS (SELECT NULL AS account_id FROM UNNEST([]) )
+SELECT
+    dim_account.segment_name  AS dim_account_segment_name,
+    COALESCE(SUM(orders_current.gross_order_amount ), 0) AS orders_current_gross_order_amount,
+    COALESCE(SUM(orders_prior.gross_order_amount ), 0) AS orders_prior_gross_order_amount,
+    COALESCE(SUM(plans_current.plan_count ), 0) AS plans_current_plan_count,
+    MIN(plans_current.month_id) || [Redacted string] || MAX(plans_current.month_id)  AS plans_current_month_range,
+    COALESCE(SUM(plans_prior.plan_count ), 0) AS plans_prior_plan_count,
+    MIN(plans_prior.month_id) || [Redacted string] || MAX(plans_prior.month_id)  AS plans_prior_month_range
+FROM none
+FULL OUTER JOIN (
+      SELECT * FROM `my_dataset.orders_monthly_summary` 
+      WHERE order_date >= DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -3 MONTH)
+        AND order_date <= DATE_ADD(DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -3 MONTH), INTERVAL 3 MONTH)
+    ) AS orders_current ON FALSE
+FULL OUTER JOIN (
+      SELECT * FROM `my_dataset.orders_monthly_summary` 
+      WHERE order_date >= DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -15 MONTH)
+        AND order_date <= DATE_ADD(DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -15 MONTH), INTERVAL 3 MONTH)
+    ) AS orders_prior ON FALSE
+FULL OUTER JOIN (
+      SELECT * FROM `my_dataset.plans_monthly_summary` 
+      WHERE plan_date >= DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -3 MONTH)
+        AND plan_date <= DATE_ADD(DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -3 MONTH), INTERVAL 3 MONTH)
+    ) AS plans_current ON FALSE
+FULL OUTER JOIN (
+      SELECT * FROM `my_dataset.plans_monthly_summary` 
+      WHERE plan_date >= DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -15 MONTH)
+        AND plan_date <= DATE_ADD(DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -15 MONTH), INTERVAL 3 MONTH)
+    ) AS plans_prior ON FALSE
+LEFT JOIN `my_dataset.dim_accounts`  AS dim_account ON dim_account.account_id = COALESCE(
+      NULL
+      , orders_current.account_id 
+      , orders_prior.account_id   
+      , plans_current.account_id   
+      , plans_prior.account_id     
+    )
+CROSS JOIN UNNEST([COALESCE(
+      CAST(NULL AS DATE)
+        , orders_current.order_date 
+        , plans_current.plan_date 
+      )]) AS date
+CROSS JOIN UNNEST([COALESCE(
+      CAST(NULL AS DATE)
+        , orders_prior.order_date 
+        , plans_prior.plan_date   
+      )]) AS date_prior
+WHERE (COALESCE(((( date ) >= ((DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -3 MONTH))) AND ( date ) < ((DATE_ADD(DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -3 MONTH), INTERVAL 3 MONTH))))),TRUE)) AND (COALESCE(((( date_prior ) >= ((DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -15 MONTH))) AND ( date_prior ) < ((DATE_ADD(DATE_ADD(DATE_TRUNC(CURRENT_DATE(), MONTH), INTERVAL -15 MONTH), INTERVAL 3 MONTH))))),TRUE))
+GROUP BY
+    1
+ORDER BY
+    2 DESC
+LIMIT 500"

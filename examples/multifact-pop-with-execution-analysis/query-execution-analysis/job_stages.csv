@@ -1,0 +1,35 @@
+All Steps (Collapsed),Records Read,Records Written,Slot ms,Wait Ms Max,Read Ms Max,Compute Ms Max,Write Ms Max,Shuffle Output Bytes,Shuffle Spilled Bytes,Slowest Type,Slowest Skew
+"COMPUTE: [""$50 := ARRAY<...>""]
+WRITE: [""$50"",""TO __stage00_output""]",0,1,51,4,0,10,21,9,0,Write,1.0
+"READ: [""$50"",""FROM __stage00_output""]
+COMPUTE: [""$250 := NULL"",""$251 := NULL"",""$252 := NULL""]
+WRITE: [""$250, $251, $252"",""TO __stage01_output""]",1,0,13,2,0,10,1,0,0,Compute,1.0
+"READ: [""$1:account_id, $2:segment_name"",""FROM my_dataset.dim_accounts""]
+WRITE: [""$1, $2"",""TO __stage02_output""]","10,000","10,000",45,1,6,24,12,"250,000",0,Compute,1.0
+"READ: [""$250, $251, $252"",""FROM __stage01_output""]
+READ: [""$40:account_id, $41:order_date, $42:gross_order_amount"",""FROM my_dataset.orders_monthly_summary"",""(1 similar table omitted)"",""WHERE and(greater_or_equal($41, [Redacted int]), less_or_equal($41, [Redacted int]))""]
+READ: [""$20:account_id, $21:month_id, $22:plan_date, $23:plan_count"",""FROM my_dataset.plans_monthly_summary"",""(1 similar table omitted)"",""WHERE and(greater_or_equal($22, [Redacted int]), less_or_equal($22, [Redacted int]))""]
+READ: [""$1, $2"",""FROM __stage02_output""]
+AGGREGATE: [""GROUP BY $300 := $290"",""$80 := SUM($284)"",""$81 := SUM($285)"",""$82 := SUM($282)"",""$83 := MIN($280)"",""$84 := MAX($280)"",""$85 := SUM($287)"",""$86 := MIN($289)"",""$87 := MAX($289)""]
+COMPUTE: [""$90 := make_array(coalesce(NULL, $286, $288))""]
+COMPUTE: [""$110 := make_array(coalesce(NULL, $283, $281))""]
+JOIN: [""$280 := $141, $281 := $142, $282 := $143, $283 := $145, $284 := $146, $285 := $147, $286 := $148, $287 := $150, $288 := $151, $289 := $152, $290 := $2"",""LEFT OUTER HASH JOIN EACH  WITH ALL  ON $130 = $1""]
+COMPUTE: [""$130 := coalesce(NULL, $144, $149, $140, $153)""]
+COMPUTE: [""$160 := NULL"",""$161 := NULL""]
+COMPUTE: [""$190 := NULL"",""$191 := NULL""]
+COMPUTE: [""$220 := NULL"",""$221 := NULL"",""$222 := NULL""]
+COMPUTE: [""$230 := NULL"",""$231 := NULL"",""$232 := NULL""]
+COMPUTE: [""$200 := NULL"",""$201 := NULL"",""$202 := NULL""]
+COMPUTE: [""$170 := NULL"",""$171 := NULL"",""$172 := NULL""]
+FILTER: [""coalesce(and(greater_or_equal($120, [Redacted int]), less($120, [Redacted int])), 1)""]
+FILTER: [""coalesce(and(greater_or_equal($100, [Redacted int]), less($100, [Redacted int])), 1)""]
+WRITE: [""$300, $80, $81, $82, $83, $84, $85, $86, $87"",""TO __stage03_output"",""BY HASH($300)""]","253,220,000","6,328","614,806","3,356","3,091","2,490",441,"213,776",0,Wait,4.2
+"READ: [""$50"",""FROM __stage00_output""]
+READ: [""$300, $80, $81, $82, $83, $84, $85, $86, $87"",""FROM __stage03_output""]
+SORT: [""$60 DESC"",""LIMIT 500""]
+COMPUTE: [""$60 := coalesce($70, 0)"",""$61 := coalesce($71, 0)"",""$62 := coalesce($72, 0)"",""$63 := concat(CAST($73 AS STRING), [Redacted string], CAST($74 AS STRING))"",""$64 := coalesce($75, 0)"",""$65 := concat(CAST($76 AS STRING), [Redacted string], CAST($77 AS STRING))""]
+AGGREGATE: [""GROUP BY $310 := $300"",""$70 := SUM($80)"",""$71 := SUM($81)"",""$72 := SUM($82)"",""$73 := MIN($83)"",""$74 := MAX($84)"",""$75 := SUM($85)"",""$76 := MIN($86)"",""$77 := MAX($87)""]
+WRITE: [""$320, $321, $322, $323, $324, $325, $326"",""TO __stage04_output""]","6,412",15,"6,861",3,0,21,26,"1,380",0,Write,5.2
+"READ: [""$320, $321, $322, $323, $324, $325, $326"",""FROM __stage04_output""]
+SORT: [""$321 DESC"",""LIMIT 500""]
+WRITE: [""$330, $331, $332, $333, $334, $335, $336"",""TO __stage05_output""]",15,15,41,5,0,9,9,"1,380",0,Compute,1.0
