@@ -1,0 +1,4 @@
+"Path, as referenced",Found? (Yes / No),Partition Column,Cluster Column 1
+my_dataset.orders_monthly_summary,Yes,order_date,account_id
+my_dataset.dim_accounts,Yes,,
+my_dataset.plans_monthly_summary,Yes,plan_date,account_id
