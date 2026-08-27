@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OJOFScenarioSpec",
+  "description": "Schema contract for OJOF LookML multi-fact evaluation scenario specifications.",
+  "type": "object",
+  "required": [
+    "status",
+    "title",
+    "description",
+    "bigquery",
+    "architecturePrompt",
+    "userQuestions"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": ["draft", "active", "deprecated"],
+      "default": "draft",
+      "description": "Lifecycle status of the scenario specification."
+    },
+    "title": {
+      "type": "string",
+      "description": "Human-readable title of the evaluation scenario."
+    },
+    "description": {
+      "type": "string",
+      "description": "Detailed summary of the scenario domain and modeling requirements."
+    },
+    "bigquery": {
+      "type": "object",
+      "required": ["dataset"],
+      "properties": {
+        "dataset": {
+          "type": "string",
+          "description": "Target BigQuery dataset name or public dataset reference."
+        },
+        "project": {
+          "type": "string",
+          "description": "Optional BigQuery GCP project ID."
+        },
+        "location": {
+          "type": "string",
+          "default": "US"
+        },
+        "anchor_date": {
+          "type": "string",
+          "description": "Optional anchor date for overriding relative date functions (e.g. '2026-08-31')."
+        },
+        "reuse_existing": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "architecturePrompt": {
+      "type": "string",
+      "description": "Primary prompt sent to the agent describing the explore design objective without dictating table schemas."
+    },
+    "userQuestions": {
+      "type": "object",
+      "description": "Dictionary of test questions evaluated against the generated LookML model.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["supported", "prompt"],
+        "properties": {
+          "supported": {
+            "type": "boolean",
+            "description": "Whether the question should be supported by the LookML model."
+          },
+          "prompt": {
+            "type": "string",
+            "description": "User question or dashboard query requirement prompt."
+          },
+          "expectation": {
+            "type": "object",
+            "properties": {
+              "participatingColumns": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "List of physical database columns (table.column) expected in the compiled SQL."
+              }
+            }
+          }
+        }
+      }
+    },
+    "tables": {
+      "type": "object",
+      "description": "Optional table definitions used by synthetic data generators. Omitted for pre-existing datasets.",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "description": { "type": "string" },
+          "rows": { "type": "integer" },
+          "primary_key": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "columns": {
+            "type": "object"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,3 +1,4 @@
 .env
+.bak # Working directory only files
 __pycache__
 logs/
