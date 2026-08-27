@@ -13,7 +13,12 @@ import sys
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-AGY_BIN = os.environ.get("AGY_BIN", shutil.which("agy") or "/usr/local/google/home/fabble/.local/bin/agy")
+AGY_BIN = (
+    os.environ.get("AGY_BIN")
+    or shutil.which("agy")
+    or shutil.which("antigravity")
+    or "/google/bin/releases/jetski-devs/tools/cli"
+)
 
 class AntigravityDriver:
     def __init__(
@@ -40,7 +45,6 @@ class AntigravityDriver:
         """
         cmd = [
             AGY_BIN,
-            "--print",
             "--model", self.model,
             "--effort", self.effort,
             "--output-format", self.output_format,
@@ -54,7 +58,7 @@ class AntigravityDriver:
             # Pass flag or point to directory without skill
             cmd.append("--disable-slash-commands")
 
-        cmd.append(prompt)
+        cmd.extend(["--print", prompt])
 
         if dry_run:
             print(f"[AntigravityDriver Dry Run] Prepared command:\n  {' '.join(cmd)}")
@@ -65,9 +69,15 @@ class AntigravityDriver:
                 "output": "Dry run execution complete. No dangerous permission flags executed."
             }
 
+        # Set up isolated execution environment with agent-specific credentials
+        env = os.environ.copy()
+        agent_key_path = os.environ.get("AGENT_GOOGLE_APPLICATION_CREDENTIALS") or str(task_dir.parents[1] / "agent-sa-key.json")
+        if os.path.exists(agent_key_path):
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = str(Path(agent_key_path).resolve())
+
         print(f"[AntigravityDriver] Executing agy for task {task_dir.name} (skill_mode={skill_mode})...")
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            res = subprocess.run(cmd, capture_output=True, text=True, check=True, env=env)
             try:
                 data = json.loads(res.stdout)
                 return {"status": "success", "data": data, "raw": res.stdout}

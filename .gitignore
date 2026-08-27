@@ -2,3 +2,10 @@
 .bak # Working directory only files
 __pycache__
 logs/
+sa-key.json
+harness-sa-key.json
+agent-sa-key.json
+*-sa-key.json
+*.key.json
+.secrets/
+credentials.json
