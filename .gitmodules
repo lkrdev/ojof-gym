@@ -1,0 +1,6 @@
+[submodule "examples/yelp"]
+	path = examples/yelp
+	url = https://github.com/fabio-looker/ojof_example.git
+[submodule "examples/bigquery_information_schema_block"]
+	path = examples/bigquery_information_schema_block
+	url = git@github.com:looker-open-source/bigquery_information_schema_block.git
