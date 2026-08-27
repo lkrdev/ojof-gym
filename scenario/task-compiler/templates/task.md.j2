@@ -1,0 +1,37 @@
+# Task: {{ title }}
+
+## Objective
+
+{{ user_goal }}
+
+## Scenario Background
+
+- **Scenario ID**: {{ scenario_id }}
+- **Complexity**: {{ complexity }}
+- **Target BigQuery Dataset**: `{{ bigquery.dataset_id }}`
+
+## Fact Tables
+
+{% for fact in fact_tables %}
+- **`{{ fact.name }}`**:
+  - Grain: {{ fact.grain }}
+  - Primary Key: `{{ fact.primary_key }}`
+  - Timestamp / Event Date: `{{ fact.timestamp_column }}`
+  - Key Measures: {{ fact.measures | join(', ') }}
+{% endfor %}
+
+## Shared Dimension Tables
+
+{% for dim in dimension_tables %}
+- **`{{ dim.name }}`**:
+  - Primary Key: `{{ dim.primary_key }}`
+  - Key Joins: {{ dim.joins_to | join(', ') }}
+{% endfor %}
+
+## Architectural Instructions & Best Practices
+
+1. Use a 0-row base view (`from: none`) with `derived_table: { sql: SELECT NULL FROM UNNEST([]) ;; }`.
+2. Join all fact tables as peer branches with `type: full_outer`, `relationship: one_to_one`, and `sql_on: FALSE ;;`.
+3. Coalesce shared timestamp columns (`codim_date`) across active fact tables.
+4. Bind shared dimension joins using Liquid conditional logic (`{% if ..._in_query %}`).
+5. Organize composite measures into a field-only view connected with a bare join.

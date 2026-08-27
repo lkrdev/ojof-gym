@@ -1,0 +1,85 @@
+{
+  "scenario_id": "synth_test_01",
+  "title": "Synthetic Ecommerce Multi-Fact Explore (3 Facts)",
+  "description": "Procedurally generated OJOF benchmark scenario covering ecommerce multi-fact analytics across disparate grains.",
+  "complexity": "medium",
+  "bigquery": {
+    "dataset_id": "ojof_synth_synth_test_01",
+    "reuse_existing": true,
+    "location": "US"
+  },
+  "fact_tables": [
+    {
+      "name": "inventory_snapshots",
+      "primary_key": [
+        "product_id",
+        "warehouse_id"
+      ],
+      "timestamp_column": "snapshot_date",
+      "grain": "1 row per product warehouse snapshot",
+      "measures": [
+        "count",
+        "stock_quantity",
+        "reorder_threshold"
+      ]
+    },
+    {
+      "name": "orders",
+      "primary_key": "order_id",
+      "timestamp_column": "order_timestamp",
+      "grain": "1 row per order",
+      "measures": [
+        "count",
+        "total_amount",
+        "tax_amount"
+      ]
+    },
+    {
+      "name": "order_items",
+      "primary_key": [
+        "order_id",
+        "item_id"
+      ],
+      "timestamp_column": "shipped_at",
+      "grain": "1 row per order item",
+      "measures": [
+        "count",
+        "item_price",
+        "discount_amount"
+      ]
+    }
+  ],
+  "dimension_tables": [
+    {
+      "name": "customers",
+      "primary_key": "customer_id",
+      "joins_to": [
+        "orders.customer_id"
+      ]
+    },
+    {
+      "name": "products",
+      "primary_key": "product_id",
+      "joins_to": [
+        "order_items.product_id",
+        "inventory_snapshots.product_id"
+      ]
+    },
+    {
+      "name": "warehouses",
+      "primary_key": "warehouse_id",
+      "joins_to": [
+        "inventory_snapshots.warehouse_id"
+      ]
+    }
+  ],
+  "user_goal": "Design a multi-fact LookML explore for ecommerce combining inventory_snapshots, orders, order_items using the Outer Join On False (OJOF) pattern. Base view must be `from: none`. Shared dimensions must use Liquid conditional joins.",
+  "expected_patterns": {
+    "base_view": "none",
+    "join_type": "full_outer",
+    "sql_on": "FALSE",
+    "coalesced_co_dimensions": [
+      "codim_date"
+    ]
+  }
+}
