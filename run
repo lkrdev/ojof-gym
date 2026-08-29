@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# OJOF-Gym Unified Task & Command Runner
+
+set -e
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  eval)
+    python3 eval/run_benchmark.py --execute --model gemini-3.6-flash "$@"
+    ;;
+  eval:thelook)
+    python3 eval/run_benchmark.py --task task_thelook_ecommerce --execute --model gemini-3.6-flash "$@"
+    ;;
+  eval:dry)
+    python3 eval/run_benchmark.py --task task_thelook_ecommerce "$@"
+    ;;
+  report)
+    python3 eval/rebuild_report.py "$@"
+    ;;
+  report:offline)
+    python3 eval/rebuild_report.py --no-looker "$@"
+    ;;
+  lint)
+    python3 verifiers/ojof_linter.py "${1:-.}"
+    ;;
+  looker:login)
+    ~/.local/bin/with-looker looker-cli session login
+    ;;
+  help|*)
+    echo "OJOF-Gym CLI Runner"
+    echo "=========================================================================="
+    echo "Usage: ./run <command> [args...]"
+    echo ""
+    echo "Available Commands:"
+    echo "  ./run eval                 Run full multi-turn evaluation on all tasks"
+    echo "  ./run eval:thelook         Run multi-turn evaluation on task_thelook_ecommerce"
+    echo "  ./run eval:dry             Run benchmark in dry-run mode (no LLM tokens)"
+    echo "  ./run report [run_dir]     Re-evaluate & rebuild reports from latest run"
+    echo "  ./run report:offline       Instantly rebuild report without Looker API calls"
+    echo "  ./run lint [dir]           Run structural invariant linter on directory"
+    echo "  ./run looker:login         Authenticate and refresh Looker CLI session"
+    echo "=========================================================================="
+    ;;
+esac

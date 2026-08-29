@@ -38,13 +38,11 @@ def render_task_md(spec: dict) -> str:
 ## Target User Questions & Analytics Goals
 
 {questions_str}
-## Architectural Instructions & Best Practices
+## Modeling Requirements & Quality Standards
 
-1. Use a 0-row base view (`from: none`) with `derived_table: {{ sql: SELECT NULL FROM UNNEST([]) ;; }}`.
-2. Join all operational fact tables as peer branches with `type: full_outer`, `relationship: one_to_one`, and `sql_on: FALSE ;;`.
-3. Coalesce shared timestamp/date columns (`codim_date`) across active fact streams.
-4. Bind shared dimension joins using Liquid conditional logic (`{{% if ..._in_query %}}`).
-5. Organize composite measures into a field-only view connected with a bare join.
+1. Model the explore(s) to accurately fulfill the target business questions without causing metric duplication or query fanout errors.
+2. Maintain high query performance across large datasets.
+3. Validate LookML syntax and model consistency.
 """
 
 def render_test_outputs(spec: dict) -> str:

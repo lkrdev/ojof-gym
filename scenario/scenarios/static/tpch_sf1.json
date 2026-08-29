@@ -1,12 +1,12 @@
 {
   "status": "draft",
-  "title": "TPC-H SF1 Multi-Fact Explore",
-  "description": "Unified OJOF explore combining orders, lineitem_shipped, lineitem_received, and partsupp across distinct grains into a single explore.",
+  "title": "TPC-H SF1 Unified Supply Chain Analytics",
+  "description": "Unified explore combining orders, line item shipments, receipt milestones, and supplier inventory across shared customer and geography dimensions.",
   "bigquery": {
     "dataset": "bigquery-public-data.tpch_sf1",
     "location": "US"
   },
-  "architecturePrompt": "You are tasked with designing a unified multi-fact LookML modeling layer for the TPC-H Benchmark schema in BigQuery (dataset: `bigquery-public-data.tpch_sf1`). The platform models order placement, line-item shipping and receipt milestones, supplier part inventory, and customer/geography dimensions.\n\nPlease introspect the dataset tables and schemas directly in BigQuery. Note that operational event views (such as `orders`, `lineitem` shipping vs receipt milestones, and `partsupp` inventory) record activities at distinct grains and event lifecycles. Your goal is to design a performant LookML architecture (such as an Outer Join On False / OJOF multi-fact explore named `tpch_unified`) that allows seamless cross-fact reporting across these disparate lifecycles without introducing cartesian fanouts, double-counting, or query performance degradation.",
+  "architecturePrompt": "You are tasked with building a LookML exploration model for our wholesale supply chain and commerce data in BigQuery (dataset: `bigquery-public-data.tpch_sf1`).\n\nOur business teams (Executive, Logistics, and Procurement) need a unified Explore where they can build combined reports and dashboards without hopping between separate disconnected explores. For example, our analysts need to:\n- Compare overall order sales volume against line-item shipping discounts grouped by customer nation and date.\n- Compare supplier parts inventory availability against total order demand grouped by geographic region.\n- Track order placements, shipping milestones, and delivery receipts side-by-side along a unified event timeline.\n\nPlease inspect the underlying dataset tables in BigQuery. Ensure that your LookML explore model enables these combined queries accurately and performantly—avoiding fanout errors, duplicated sums, or slow query performance when metrics from different tables (like orders, lineitem events, and part-supplier inventory) are queried together alongside common dimensions (customer, nation, region, date).",
   "userQuestions": {
     "ordersVsShipmentsByNation": {
       "supported": true,

@@ -1,0 +1,55 @@
+{
+  "status": "draft",
+  "title": "TheLook E-Commerce Unified Retail Analytics",
+  "description": "Unified analytics explore combining order transactions, line-item fulfillment, warehouse inventory, and web event traffic across shared customer, product, and geographic dimensions.",
+  "bigquery": {
+    "dataset": "bigquery-public-data.thelook_ecommerce",
+    "location": "US",
+    "reuse_existing": true
+  },
+  "architecturePrompt": "You are tasked with building a unified LookML exploration model for our e-commerce business using the public dataset in BigQuery (dataset: `bigquery-public-data.thelook_ecommerce`).\n\nOur business teams (Merchandising, Marketing, and Operations) need a single, intuitive Explore to answer combined business questions without navigating multiple fragmented models. Key reporting scenarios include:\n- Comparing sales revenue and product profit margins against warehouse inventory valuation and available stock, sliced by product brand or category.\n- Evaluating digital marketing impact by looking at web browsing event activity alongside actual order conversion value and customer volume by acquisition channel and customer geography.\n- Monitoring order fulfillment health by tracking total orders placed against item-level returns and cancellations across user locations over time.\n\nPlease inspect the tables in `bigquery-public-data.thelook_ecommerce`. Design your LookML explore so that business users can seamlessly combine metrics across order items, warehouse inventory, web events, and order headers alongside shared dimensions (products, users, distribution centers, and common calendar dates) in single queries without duplicate metric aggregations, inflated row counts, or query performance issues.",
+  "userQuestions": {
+    "salesRevenueVsInventoryCostByCategory": {
+      "supported": true,
+      "prompt": "Create a query for the merchandising dashboard comparing total completed sales revenue against total inventory cost on hand, grouped by product category.",
+      "expectation": {
+        "participatingColumns": [
+          "order_items.sale_price",
+          "order_items.status",
+          "inventory_items.cost",
+          "products.category"
+        ]
+      }
+    },
+    "webTrafficVsOrderRevenueByTrafficSource": {
+      "supported": true,
+      "prompt": "Create a marketing query comparing total web session events against total order sales revenue, grouped by user acquisition traffic source.",
+      "expectation": {
+        "participatingColumns": [
+          "events.id",
+          "order_items.sale_price",
+          "users.traffic_source"
+        ]
+      }
+    },
+    "orderVolumeVsReturnedItemsByState": {
+      "supported": true,
+      "prompt": "Create a fulfillment query comparing distinct order count against returned item count, grouped by customer state.",
+      "expectation": {
+        "participatingColumns": [
+          "orders.order_id",
+          "order_items.id",
+          "order_items.status",
+          "users.state"
+        ]
+      }
+    },
+    "unsupportedRealtimeServerLogs": {
+      "supported": false,
+      "prompt": "Show real-time container CPU metrics and cluster node memory usage by minute.",
+      "expectation": {
+        "participatingColumns": []
+      }
+    }
+  }
+}

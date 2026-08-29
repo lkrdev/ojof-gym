@@ -1,0 +1,23 @@
+{
+  "name": "ojof-gym",
+  "version": "1.0.0",
+  "description": "LookML patterns, benchmark tasks, and evaluation harnesses for Outer Join On False (OJOF) multi-fact explores.",
+  "scripts": {
+    "eval": "python3 eval/run_benchmark.py --execute --model gemini-3.6-flash",
+    "eval:thelook": "python3 eval/run_benchmark.py --task task_thelook_ecommerce --execute --model gemini-3.6-flash",
+    "eval:dry": "python3 eval/run_benchmark.py --task task_thelook_ecommerce",
+    "report": "python3 eval/rebuild_report.py",
+    "report:offline": "python3 eval/rebuild_report.py --no-looker",
+    "lint": "python3 verifiers/ojof_linter.py .",
+    "looker:login": "~/.local/bin/with-looker looker-cli session login"
+  },
+  "keywords": [
+    "lookml",
+    "ojof",
+    "looker",
+    "bigquery",
+    "eval"
+  ],
+  "author": "Google",
+  "license": "Apache-2.0"
+}

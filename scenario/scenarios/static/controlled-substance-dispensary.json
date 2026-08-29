@@ -1,13 +1,13 @@
 {
   "status": "draft",
   "title": "Controlled Substance Dispensary (Small)",
-  "description": "Multi-center controlled substance dispensing, inventory reconciliation, administration, wastage tracking, and procurement schema for evaluating multi-fact LookML explores.",
+  "description": "Unified explore combining dispensing access logs, patient dose administrations, wastage records, procurement orders, and daily inventory reconciliations across medical centers.",
   "bigquery": {
     "dataset": "ojof_dispensary_small",
     "location": "US",
     "anchor_date": "2026-08-31"
   },
-  "architecturePrompt": "You are tasked with designing a unified multi-fact LookML modeling layer for a multi-center Controlled Substance Dispensary platform in BigQuery. The platform tracks controlled substance lifecycles across medical centers—including cabinet access logs (dispensing), patient dose administrations, wastage records, supplier inventory procurement orders, and daily physical inventory reconciliations.\n\nPlease introspect the dataset tables and schemas directly in BigQuery. Key operational event tables (such as `access_log`, `administration`, `wastage`, `orders`, and `daily_inventory`) record activities at distinct grains and event lifecycles. Your goal is to design a performant LookML architecture (such as an Outer Join On False / OJOF multi-fact explore) that allows seamless cross-fact reporting across these disparate lifecycles without introducing cartesian fanouts, double-counting, or query performance degradation.",
+  "architecturePrompt": "You are tasked with building a LookML data model for our multi-center Controlled Substance Dispensary tracking system in BigQuery.\n\nClinical pharmacy supervisors, compliance auditors, and procurement managers require a single, unified Explore to audit controlled substance movement end-to-end. For example, users need to:\n- Reconcile cabinet dispensing quantities against patient dose administrations and recorded wastage by medical center, substance, and date.\n- Audit daily physical inventory counts against dispense and restocking logs to detect count discrepancies across centers.\n- Track supplier procurement purchase orders alongside dispensing demand across medical centers over time.\n\nPlease inspect the tables in BigQuery. Ensure that your LookML explore allows users to combine metrics across dispensing logs, administrations, wastage, purchase orders, and daily inventory snapshots alongside common dimensions (medical center, substance, staff user, and calendar date) in single queries without duplicate metric aggregations or cartesian row inflation.",
   "userQuestions": {
     "dashCenterDailyDispensedCheck": {
       "supported": true,

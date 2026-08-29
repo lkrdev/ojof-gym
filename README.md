@@ -1,139 +1,143 @@
 # ojof-gym
 
-LookML patterns, benchmark tasks, and evaluation harnesses for Outer Join On False (OJOF) multi-fact explores.
+LookML patterns, benchmark tasks, and evaluation harnesses for **Outer Join On False (OJOF)** multi-fact explores.
 
 ---
 
-## 1. Project Setup & Prerequisites
+## 1. Overview
 
-### A. BigQuery & GCP Configuration
-The evaluation harness and agent use BigQuery to introspect schemas, validate generated queries, and analyze execution performance metrics.
+In enterprise data warehouses (e.g. Google BigQuery), querying metrics across multiple fact tables of disparate grains (such as line-item sales orders, warehouse inventory stock, and website clickstream sessions) within a single Looker Explore often leads to severe data inaccuracies:
+* **Cartesian Fanouts & Chasm Traps:** Joining one-to-many fact tables through shared dimensions creates row multiplication, causing inflated aggregations and requiring heavy symmetric aggregates.
+* **Grain Imbalance:** Standard single-base table models bias calculations toward the base grain, making cross-domain ratios difficult to maintain.
 
-1. **Set your active GCP project:**
-   ```bash
-   export GOOGLE_CLOUD_PROJECT="<YOUR_PROJECT_ID>"
-   gcloud config set project "$GOOGLE_CLOUD_PROJECT"
-   ```
+The **Outer Join On False (OJOF)** architecture solves this by:
+1. Using a **0-row base view** (`from: none` or `SELECT NULL FROM UNNEST([])`).
+2. Joining fact tables via **`type: full_outer`** and **`sql_on: FALSE`** to keep fact streams isolated.
+3. Joining shared dimensions dynamically using **Liquid `_in_query`** coalescing conditions to prune unneeded joins.
+4. Defining cross-fact composite metrics using bare joins or composite view extensions.
 
-2. **Dual Service Account Architecture (Principle of Least Privilege):**
-   We enforce a clean separation between the **Harness Evaluator** (which creates test datasets and validates results) and the **Agent Under Evaluation** (which can only query and inspect metadata, but cannot alter or delete benchmark datasets).
-
-   Run the following script to provision both accounts in your project:
-
-   ```bash
-   export PROJECT_ID="<YOUR_PROJECT_ID>"
-   export YOUR_USER_EMAIL="<YOUR_USER_EMAIL>"  # Your in-org GCP login email
-
-   # ==========================================
-   # 1. HARNESS SERVICE ACCOUNT (Evaluator / Provisioner)
-   # Permissions: Run query jobs, create & edit benchmark datasets
-   # ==========================================
-   HARNESS_SA="ojof-eval-harness"
-   HARNESS_EMAIL="${HARNESS_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
-
-   gcloud iam service-accounts create "$HARNESS_SA" \
-     --project="$PROJECT_ID" \
-     --description="Benchmarking harness provisioner & evaluator" \
-     --display-name="OJOF Eval Harness"
-
-   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-     --member="serviceAccount:$HARNESS_EMAIL" \
-     --role="roles/bigquery.user"
-
-   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-     --member="serviceAccount:$HARNESS_EMAIL" \
-     --role="roles/bigquery.dataEditor"
-
-   # Allow your user account to impersonate the Harness SA (Keyless / Org-Policy Compliant)
-   gcloud iam service-accounts add-iam-policy-binding "$HARNESS_EMAIL" \
-     --project="$PROJECT_ID" \
-     --member="user:${YOUR_USER_EMAIL}" \
-     --role="roles/iam.serviceAccountTokenCreator"
-
-   # ==========================================
-   # 2. AGENT SERVICE ACCOUNT (Model Under Evaluation)
-   # Permissions: Run query jobs, read-only metadata & tables (NO edit/delete)
-   # ==========================================
-   AGENT_SA="ojof-agent-runner"
-   AGENT_EMAIL="${AGENT_SA}@${PROJECT_ID}.iam.gserviceaccount.com"
-
-   gcloud iam service-accounts create "$AGENT_SA" \
-     --project="$PROJECT_ID" \
-     --description="Agent under evaluation (read-only queries & introspection)" \
-     --display-name="OJOF Agent Runner"
-
-   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-     --member="serviceAccount:$AGENT_EMAIL" \
-     --role="roles/bigquery.jobUser"
-
-   gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-     --member="serviceAccount:$AGENT_EMAIL" \
-     --role="roles/bigquery.dataViewer"
-
-   # Allow your user account to impersonate the Agent SA (Keyless / Org-Policy Compliant)
-   gcloud iam service-accounts add-iam-policy-binding "$AGENT_EMAIL" \
-     --project="$PROJECT_ID" \
-     --member="user:${YOUR_USER_EMAIL}" \
-     --role="roles/iam.serviceAccountTokenCreator"
-   ```
-
-3. **Keyless Authentication in Runner Environment:**
-   Authenticate your user session (Application Default Credentials):
-   ```bash
-   gcloud auth application-default login --no-launch-browser
-   ```
-   Both the harness and the agent driver will automatically generate short-lived, in-memory tokens via impersonation without requiring static key files on disk.
+**`ojof-gym`** is the standardized benchmarking harness used to evaluate AI agents and data developers on their ability to build, maintain, and refactor production-grade OJOF LookML models.
 
 ---
 
-### B. Looker API & Spectacles Setup
-Create a `.env` file in the project root to configure Looker validation (this file is git-ignored):
+## 2. Evaluation Methodology: 2-Turn Lifecycle
 
+To measure true architectural flexibility rather than rote query memorization, benchmarks run across a **two-turn evaluation protocol**:
+
+```mermaid
+graph TD
+    A[Scenario Specification] --> B[Turn 1: Greenfield Synthesis]
+    B -->|Agent Prompted only with Domain Requirements & Table Schemas| C[Baseline LookML Model]
+    C --> D[Turn 2: Maintenance & Extension]
+    D -->|Agent Prompted with 3 Target Dashboard Queries| E[Maintained LookML Model]
+    E --> F[Unified Evaluation Verifiers]
+    F --> G[Level 1: Structural Invariants Static Linter]
+    F --> H[Level 2: Looker Project Validation]
+    F --> I[Level 3: BigQuery Execution & Performance Analysis]
+```
+
+1. **Turn 1 (Greenfield Architecture Synthesis):**
+   The agent is given the high-level business goals and dataset table schemas (`bigquery-public-data.thelook_ecommerce`), but **no target user queries**.
+2. **Turn 2 (Maintenance & Refactoring Protocol):**
+   The agent is given concrete business dashboard queries and asked to extend its baseline model.
+3. **Refactoring Friction Measurement:**
+   The harness tracks line additions, deletions, code churn, and blast radius (number of modified files) between turns. Well-structured models require small additive changes (+40 lines) with zero architectural rework, whereas rigid models suffer high refactoring friction (+80 lines with explore rewrites).
+
+---
+
+## 3. Three-Tier Verification Engine
+
+Every evaluation run validates candidate models against three rigorous verification tiers:
+
+| Tier | Verifier | Description |
+| :--- | :--- | :--- |
+| **Level 1** | **Structural Invariant Linter** | Pattern and regex-based static analysis auditing 0-row base tables, `full_outer` / `sql_on: FALSE` fact joins, and Liquid `_in_query` coalescing logic. |
+| **Level 2** | **Looker Project Validator** | Deploys candidate files to a Looker development workspace via `looker-cli` and runs full schema, graph, and model validation (0 syntax or reference errors). |
+| **Level 3** | **SQL Compilation & BigQuery Execution** | Compiles dashboard queries to SQL, validates column participation, and runs queries live against BigQuery (measuring latency, row counts, bytes scanned, bytes shuffled, and spill to disk). |
+
+---
+
+## 4. Quick Start & Command Catalogue
+
+A universal `./run` task runner script is provided in the repository root (similar to `npm run` in Node.js projects):
+
+```bash
+# Display help and all available commands
+./run help
+```
+
+| Task / Workflow | Fast `./run` Command | Direct Python Command | Description |
+| :--- | :--- | :--- | :--- |
+| **Run E2E Benchmark** | `./run eval` | `python3 eval/run_benchmark.py --execute` | Runs full 2-turn benchmark across all tasks |
+| **Run Single Task (TheLook)** | `./run eval:thelook` | `python3 eval/run_benchmark.py --task task_thelook_ecommerce --execute` | Evaluates `task_thelook_ecommerce` |
+| **Dry Run Benchmark** | `./run eval:dry` | `python3 eval/run_benchmark.py --task task_thelook_ecommerce` | Validates task compilation without spending LLM tokens |
+| **Rebuild Reports (Fast)** | `./run report` | `python3 eval/rebuild_report.py` | Re-evaluates verifiers & rebuilds reports from saved artifacts |
+| **Offline Report Rebuild** | `./run report:offline` | `python3 eval/rebuild_report.py --no-looker` | Instant report formatting without Looker API calls (<1s) |
+| **Run Structural Linter** | `./run lint` | `python3 verifiers/ojof_linter.py .` | Audits LookML directory against OJOF invariants |
+| **Looker CLI Login** | `./run looker:login` | `~/.local/bin/with-looker looker-cli session login` | Refreshes Looker API access session |
+
+---
+
+## 5. Fast Iterations from Persisted Run Exports
+
+All agent outputs and generated LookML files are automatically persisted on disk in `eval_exports/run_<timestamp>/`.
+
+To refine verifiers, adjust presentation, or re-run queries **without re-running the slow LLM agent**:
+
+```bash
+# Re-evaluates saved LookML against Looker & BigQuery and updates reports (~5s):
+./run report
+
+# Or specify a particular historical run directory:
+./run report eval_exports/run_20260829_001115
+
+# Instant offline report generation (<1s):
+./run report:offline
+```
+
+---
+
+## 6. Generated Run Artifacts Bundle
+
+Each benchmark run generates a self-contained export bundle under `eval_exports/run_<timestamp>/<task_id>/`:
+
+```text
+eval_exports/run_20260829_001115/task_thelook_ecommerce/
+├── eval_report.md                                   # Comprehensive Side-by-Side Markdown Report
+├── with_skill/
+│   ├── turn1_baseline_lookml/                       # 12 Baseline LookML files from Turn 1
+│   ├── turn2_maintained_lookml/                     # 12 Maintained LookML files from Turn 2
+│   ├── model_refactoring.diff                       # Unified diff between Turn 1 & Turn 2
+│   └── queries/
+│       ├── salesRevenueVsInventoryCostByCategory_query.json
+│       ├── salesRevenueVsInventoryCostByCategory_compiled.sql
+│       ├── salesRevenueVsInventoryCostByCategory_sample_data.json
+│       ├── salesRevenueVsInventoryCostByCategory_sample_data.csv (50 rows)
+│       └── ... (for all target queries)
+└── no_skill/
+    ├── turn1_baseline_lookml/                       # 9 Baseline LookML files from Turn 1
+    ├── turn2_maintained_lookml/                     # 9 Maintained LookML files from Turn 2
+    ├── model_refactoring.diff                       # Unified diff between Turn 1 & Turn 2
+    └── queries/
+        └── ... (query definitions, compiled SQL, 50-row CSV/JSON sample data)
+```
+
+---
+
+## 7. Environment & Credentials Configuration
+
+### A. BigQuery Credentials (Application Default Credentials)
+```bash
+export GOOGLE_CLOUD_PROJECT="<YOUR_GCP_PROJECT>"
+gcloud auth application-default login
+```
+
+### B. Looker API Configuration
+Configure `.env` or standard `looker-cli` profile (`~/.config/looker-cli/config.yaml`):
 ```env
 LOOKER_BASE_URL=https://your-looker-instance.cloud.looker.com
 LOOKER_CLIENT_ID=your_client_id
 LOOKER_CLIENT_SECRET=your_client_secret
-LOOKER_PROJECT=your_project_name
+LOOKER_PROJECT=lookml_sandbox
+LOOKER_CONNECTION=default_bigquery_connection
 ```
-
----
-
-## 2. Running Benchmarks & Verifiers
-
-### A. Run SkillsBench Evaluation Suite
-Execute the benchmark runner to evaluate tasks across skill modes (`with-skill` vs. `no-skill`):
-
-```bash
-# Dry run mode (validates task compilation and CLI command structure)
-python3 eval/run_benchmark.py --tasks-dir tasks
-
-# Live execution mode with Antigravity driver
-python3 eval/run_benchmark.py --tasks-dir tasks --execute --model gemini-3.6-flash
-```
-
-### B. Run Offline LookML Linter & Verifiers
-Audit any LookML directory directly against OJOF architectural invariants:
-
-```bash
-# Audit specific example or task directory
-python3 verifiers/ojof_linter.py examples/tpch_sf1
-
-# Run task-specific verifier
-python3 tasks/task_tpch_sf1_multifact/verifier/test_outputs.py
-```
-
-### C. Validation with Spectacles
-```bash
-# Test connection
-uvx --env-file .env spectacles connect
-
-# Validate LookML syntax
-uvx --env-file .env spectacles lookml
-
-# Validate SQL queries against the warehouse
-uvx --env-file .env spectacles sql
-
-# Run Looker data tests
-uvx --env-file .env spectacles assert
-```
-
