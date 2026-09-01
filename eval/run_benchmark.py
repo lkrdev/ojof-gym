@@ -100,7 +100,8 @@ def run_multi_turn_mode_evaluation(
     dry_run: bool,
     scenario_spec: Dict[str, Any],
     looker_eval: LookerEvaluator,
-    workspace_dir: Path
+    workspace_dir: Path,
+    max_queries: Optional[int] = None
 ) -> Dict[str, Any]:
     print(f"\n  -------------------------------------------------------")
     print(f"  [Mode Execution] Starting --skill-mode {skill_mode} (dry_run={dry_run})")
@@ -134,6 +135,9 @@ def run_multi_turn_mode_evaluation(
     supported_queries = [
         (qk, qval) for qk, qval in user_questions.items() if qval.get("supported", True)
     ]
+    if max_queries is not None and max_queries > 0:
+        supported_queries = supported_queries[:max_queries]
+        print(f"  [Light Mode] Evaluating first {len(supported_queries)} query turns.")
 
     turn_counter = 2
     queries_served_without_changes = 0
@@ -243,7 +247,12 @@ def run_multi_turn_mode_evaluation(
         # Level 3: Looker SQL Compilation & BigQuery Execution
         if looker_val.get("is_valid"):
             print(f"  [Level 3 Looker] Compiling queries & running live BigQuery execution...")
-            looker_queries = looker_eval.evaluate_scenario_questions(scenario_spec)
+            all_q_res = looker_eval.evaluate_scenario_questions(scenario_spec)
+            if supported_queries:
+                supp_keys = {k for k, _ in supported_queries}
+                looker_queries = {k: v for k, v in all_q_res.items() if k in supp_keys}
+            else:
+                looker_queries = all_q_res
             passed_q = sum(1 for q in looker_queries.values() if isinstance(q, dict) and q.get('status') == 'passed')
             total_q = sum(1 for q in scenario_spec.get('userQuestions', {}).values() if q.get('supported', True))
             print(f"  [Level 3 Looker] Queries Passing: {passed_q}/{total_q}")
@@ -302,7 +311,8 @@ def run_benchmark(
     target_task: Optional[str] = None,
     model: str = "gemini-3.6-flash",
     dry_run: bool = True,
-    output_dir: Path = Path("eval_exports")
+    output_dir: Path = Path("eval_exports"),
+    max_queries: Optional[int] = None
 ) -> Dict[str, Any]:
     if target_task:
         task_dirs = [tasks_dir / target_task]
@@ -319,12 +329,34 @@ def run_benchmark(
     driver = AntigravityDriver(model=model, skip_permissions=not dry_run)
     looker_eval = LookerEvaluator()
 
+    # Pre-flight connectivity validation
+    if not dry_run:
+        print("\n[Pre-flight] Validating Looker API & BigQuery connectivity...")
+        if not looker_eval.ensure_authenticated():
+            print("\n=======================================================")
+            print("[ABORT] Looker API is NOT connected or session is invalid!")
+            print("Please ensure the SSH reverse tunnel on port 8445 is open from your workstation:")
+            print("  ssh -o StrictHostKeyChecking=no -N -R 8445:<LOOKER_HOST>:443 corpagent-eng-<USER>@mpl-<CAPSULE_NAME>.c.googlers.com")
+            print("=======================================================\n")
+            sys.exit(1)
+        
+        # Test BigQuery dataset accessibility
+        try:
+            res_bq = subprocess.run(["bq", "show", "--dataset", "bigquery-public-data:thelook_ecommerce"], capture_output=True, text=True, timeout=15)
+            if res_bq.returncode != 0:
+                print(f"[Warning] BigQuery dataset check returned code {res_bq.returncode}: {res_bq.stderr}")
+        except Exception as e:
+            print(f"[Warning] Could not verify BigQuery dataset: {e}")
+        print("[Pre-flight] Looker API and BigQuery verified successfully.\n")
+
     all_results = {
         "benchmark_summary": {
             "timestamp": timestamp,
             "total_tasks": len(task_dirs),
             "model": model,
             "dry_run": dry_run,
+            "light_mode": (max_queries is not None),
+            "max_queries": max_queries,
             "looker_connected": looker_eval.is_available()
         },
         "tasks": []
@@ -336,6 +368,8 @@ def run_benchmark(
         task_name = task_dir.name
         print(f"\n=======================================================")
         print(f"[Benchmark Runner] Evaluating Task: {task_name}")
+        if max_queries:
+            print(f"[Benchmark Runner] Light Mode active: max {max_queries} query turn(s)")
         print(f"=======================================================")
 
         scenario_file = PROJECT_ROOT / "scenario" / "scenarios" / "static" / f"{task_name.replace('task_', '')}.json"
@@ -354,7 +388,7 @@ def run_benchmark(
         task_export_dir.mkdir(parents=True, exist_ok=True)
 
         # ----------------------------------------------------
-        # 1. Run WITH skill (2-Turn Lifecycle)
+        # 1. Run WITH skill (Multi-Turn Lifecycle)
         # ----------------------------------------------------
         with_skill_ws = isolated_base / f"{task_name}_with_skill"
         res_with = run_multi_turn_mode_evaluation(
@@ -364,7 +398,8 @@ def run_benchmark(
             dry_run=dry_run,
             scenario_spec=scenario_spec,
             looker_eval=looker_eval,
-            workspace_dir=with_skill_ws
+            workspace_dir=with_skill_ws,
+            max_queries=max_queries
         )
 
         # Export LookML files
@@ -374,7 +409,7 @@ def run_benchmark(
             (with_skill_export_dir / fname).write_text(fcontent)
 
         # ----------------------------------------------------
-        # 2. Run WITHOUT skill (2-Turn Lifecycle)
+        # 2. Run WITHOUT skill (Multi-Turn Lifecycle)
         # ----------------------------------------------------
         no_skill_ws = isolated_base / f"{task_name}_no_skill"
         res_no = run_multi_turn_mode_evaluation(
@@ -384,7 +419,8 @@ def run_benchmark(
             dry_run=dry_run,
             scenario_spec=scenario_spec,
             looker_eval=looker_eval,
-            workspace_dir=no_skill_ws
+            workspace_dir=no_skill_ws,
+            max_queries=max_queries
         )
 
         # Export LookML files
@@ -433,18 +469,23 @@ def main():
     parser.add_argument("--task", type=str, default=None, help="Target specific task name")
     parser.add_argument("--model", type=str, default="gemini-3.6-flash")
     parser.add_argument("--execute", action="store_true", help="Run live agy execution (default is dry-run)")
+    parser.add_argument("--light", action="store_true", help="Fast iteration mode (caps at 3 query turns)")
+    parser.add_argument("--max-queries", type=int, default=None, help="Maximum number of query turns to evaluate")
     parser.add_argument("--out-dir", type=str, default="eval_exports", help="Export root directory")
 
     args = parser.parse_args()
     tasks_dir = Path(args.tasks_dir)
     out_dir = Path(args.out_dir)
 
+    max_q = 3 if args.light and not args.max_queries else args.max_queries
+
     run_benchmark(
         tasks_dir=tasks_dir,
         target_task=args.task,
         model=args.model,
         dry_run=not args.execute,
-        output_dir=out_dir
+        output_dir=out_dir,
+        max_queries=max_q
     )
 
 if __name__ == "__main__":
