@@ -8,6 +8,8 @@ Generates rich HTML and Markdown benchmark artifact bundles from persisted run d
 5. Generates self-contained HTML and Markdown comparative evaluation reports
 """
 
+from __future__ import annotations
+
 import csv
 import datetime
 import difflib
@@ -26,9 +28,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from eval.run_benchmark import get_bigquery_table_stats
+def get_bigquery_table_stats(dataset: str) -> List[Dict[str, Any]]:
+    """Fetches table names and row counts with persistent disk cache."""
+    if not dataset:
+        return []
+    clean_ds = dataset.replace(".", ":") if ":" not in dataset and "." in dataset else dataset
+    cache_file = PROJECT_ROOT / "eval_exports" / ".bq_table_cache.json"
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text())
+            if clean_ds in cache:
+                return cache[clean_ds]
+        except Exception:
+            pass
+    from eval.run_benchmark import get_bigquery_table_stats as fetch_stats
+    return fetch_stats(dataset)
+
 from verifiers.ojof_linter import audit_lookml_directory
-from verifiers.looker_evaluator import LookerEvaluator, run_looker_cli
 
 def generate_unified_diff(turn1_files: Dict[str, str], turn2_files: Dict[str, str]) -> str:
     """Generates a complete multi-file unified diff string."""
@@ -240,8 +256,8 @@ def fetch_bq_job_metrics_for_query(evaluator: LookerEvaluator, approx_timestamp:
         "dashboard_link": f"/dashboards/bigquery_information_schema::job_lookup_dashboard?Created={today_encoded}"
     }
 
-def process_run_artifacts(run_dir: Path):
-    print(f"[Artifact Generator] Processing run: {run_dir}")
+def process_run_artifacts(run_dir: Path, live_eval: bool = False):
+    print(f"[Artifact Generator] Processing run: {run_dir} (live_eval={live_eval})")
     eval_json_path = run_dir / "eval_results.json"
     if not eval_json_path.exists():
         raise FileNotFoundError(f"Missing {eval_json_path}")
@@ -249,8 +265,11 @@ def process_run_artifacts(run_dir: Path):
     with open(eval_json_path) as f:
         master_results = json.load(f)
 
-    evaluator = LookerEvaluator()
-    evaluator.ensure_authenticated()
+    evaluator = None
+    if live_eval:
+        from verifiers.looker_evaluator import LookerEvaluator
+        evaluator = LookerEvaluator()
+        evaluator.ensure_authenticated()
 
     for task_data in master_results.get("tasks", []):
         task_id = task_data["task_id"]
@@ -292,71 +311,77 @@ def process_run_artifacts(run_dir: Path):
             # 2. Capture Unified Diff between Turn 1 and Turn 2
             diff_text = generate_unified_diff(t1_files, t2_files)
             diff_file = mode_export_dir / "model_refactoring.diff"
-            diff_file.write_text(diff_text)
-            print(f"  [OK] Saved model refactoring diff: {diff_file.name}")
+            if diff_text:
+                diff_file.write_text(diff_text)
+                print(f"  [OK] Saved model refactoring diff: {diff_file.name}")
 
-            # Deploy to Looker to evaluate queries and BQ performance
-            print(f"  [Looker Sync] Syncing {mode_name} to Looker development workspace...")
-            evaluator.sync_files_to_looker(t2_dir)
-            val_res = evaluator.validate_project()
-            mode_data["looker_validation"] = val_res
+            # Re-run local structural linter
+            if t2_dir.exists() and list(t2_dir.glob("*.lkml")):
+                mode_data["linter_results"] = audit_lookml_directory(t2_dir)
 
-            # 3. Process Queries, SQL, Sample Data, and BQ Performance
             queries_dir = mode_export_dir / "queries"
             queries_dir.mkdir(parents=True, exist_ok=True)
 
-            max_q = master_results.get("benchmark_summary", {}).get("max_queries")
-            eval_turns = list(mode_data.get("query_turns", {}).keys())
-            if not eval_turns and max_q:
-                all_supp = [k for k, v in scenario_spec.get("userQuestions", {}).items() if v.get("supported", True)]
-                eval_turns = all_supp[:max_q]
+            if live_eval and evaluator:
+                # Deploy to Looker to evaluate queries and BQ performance
+                print(f"  [Looker Sync] Syncing {mode_name} to Looker development workspace...")
+                evaluator.sync_files_to_looker(t2_dir)
+                val_res = evaluator.validate_project()
+                mode_data["looker_validation"] = val_res
 
-            query_results = evaluator.evaluate_scenario_questions(scenario_spec)
-            if eval_turns:
-                query_results = {k: v for k, v in query_results.items() if k in eval_turns}
+                # 3. Process Queries, SQL, Sample Data, and BQ Performance
+                max_q = master_results.get("benchmark_summary", {}).get("max_queries")
+                eval_turns = list(mode_data.get("query_turns", {}).keys())
+                if not eval_turns and max_q:
+                    all_supp = [k for k, v in scenario_spec.get("userQuestions", {}).items() if v.get("supported", True)]
+                    eval_turns = all_supp[:max_q]
 
-            mode_data["looker_queries"] = query_results
-            mode_data["bq_job_analysis"] = {}
+                query_results = evaluator.evaluate_scenario_questions(scenario_spec)
+                if eval_turns:
+                    query_results = {k: v for k, v in query_results.items() if k in eval_turns}
 
-            for qkey, qdata in query_results.items():
-                if not qdata.get("supported", True):
-                    continue
+                mode_data["looker_queries"] = query_results
+                mode_data["bq_job_analysis"] = {}
 
-                q_payload = qdata.get("query_payload", {})
-                q_sql = qdata.get("compiled_sql", "")
+                for qkey, qdata in query_results.items():
+                    if not qdata.get("supported", True):
+                        continue
 
-                # A. Save Query JSON Payload
-                q_json_file = queries_dir / f"{qkey}_query.json"
-                q_json_file.write_text(json.dumps(q_payload, indent=2))
+                    q_payload = qdata.get("query_payload", {})
+                    q_sql = qdata.get("compiled_sql", "")
 
-                # B. Save Compiled SQL
-                q_sql_file = queries_dir / f"{qkey}_compiled.sql"
-                q_sql_file.write_text(q_sql)
+                    # A. Save Query JSON Payload
+                    q_json_file = queries_dir / f"{qkey}_query.json"
+                    q_json_file.write_text(json.dumps(q_payload, indent=2))
 
-                # C. Run Live Query against BigQuery and Save 50-row Sample Data
-                run_res = run_full_query_and_sample(evaluator, q_payload)
-                all_rows = run_res.get("rows", [])
-                sample_rows = all_rows[:50]
-                
-                # Save JSON sample data
-                data_json_file = queries_dir / f"{qkey}_sample_data.json"
-                data_json_file.write_text(json.dumps(sample_rows, indent=2))
+                    # B. Save Compiled SQL
+                    q_sql_file = queries_dir / f"{qkey}_compiled.sql"
+                    q_sql_file.write_text(q_sql)
 
-                # Save CSV sample data
-                if sample_rows and isinstance(sample_rows, list) and isinstance(sample_rows[0], dict):
-                    data_csv_file = queries_dir / f"{qkey}_sample_data.csv"
-                    with open(data_csv_file, "w", newline="") as fcsv:
-                        writer = csv.DictWriter(fcsv, fieldnames=list(sample_rows[0].keys()))
-                        writer.writeheader()
-                        writer.writerows(sample_rows)
+                    # C. Run Live Query against BigQuery and Save 50-row Sample Data
+                    run_res = run_full_query_and_sample(evaluator, q_payload)
+                    all_rows = run_res.get("rows", [])
+                    sample_rows = all_rows[:50]
+                    
+                    # Save JSON sample data
+                    data_json_file = queries_dir / f"{qkey}_sample_data.json"
+                    data_json_file.write_text(json.dumps(sample_rows, indent=2))
 
-                # D. Fetch BQ Job Performance from INFORMATION_SCHEMA
-                bq_metrics = fetch_bq_job_metrics_for_query(evaluator, approx_timestamp="", query_sql=q_sql)
-                bq_metrics["client_latency_ms"] = run_res.get("latency_ms", 0)
-                bq_metrics["rows_returned"] = run_res.get("row_count", 0)
-                mode_data["bq_job_analysis"][qkey] = bq_metrics
+                    # Save CSV sample data
+                    if sample_rows and isinstance(sample_rows, list) and isinstance(sample_rows[0], dict):
+                        data_csv_file = queries_dir / f"{qkey}_sample_data.csv"
+                        with open(data_csv_file, "w", newline="") as fcsv:
+                            writer = csv.DictWriter(fcsv, fieldnames=list(sample_rows[0].keys()))
+                            writer.writeheader()
+                            writer.writerows(sample_rows)
 
-                print(f"  [OK] Query '{qkey}': SQL, JSON, Sample Data ({len(sample_rows)} rows), BQ Job ID: {bq_metrics.get('job_id')}")
+                    # D. Fetch BQ Job Performance from INFORMATION_SCHEMA
+                    bq_metrics = fetch_bq_job_metrics_for_query(evaluator, approx_timestamp="", query_sql=q_sql)
+                    bq_metrics["client_latency_ms"] = run_res.get("latency_ms", 0)
+                    bq_metrics["rows_returned"] = run_res.get("row_count", 0)
+                    mode_data["bq_job_analysis"][qkey] = bq_metrics
+
+                    print(f"  [OK] Query '{qkey}': SQL, JSON, Sample Data ({len(sample_rows)} rows), BQ Job ID: {bq_metrics.get('job_id')}")
 
         # Update HTML and Markdown Reports
         html_report = generate_html_report_with_artifacts(
@@ -370,14 +395,12 @@ def process_run_artifacts(run_dir: Path):
         (task_dir / "eval_report.html").write_text(html_report)
         (task_dir / "eval_report.md").write_text(html_report)
 
-        # Export to external artifact directory if configured
-        artifact_dir = os.environ.get("ARTIFACT_DIR")
-        if artifact_dir and Path(artifact_dir).exists():
-            art_html = Path(artifact_dir) / f"{scenario_name}_evaluation_report.html"
-            art_html.write_text(html_report)
-            art_md = Path(artifact_dir) / f"{scenario_name}_evaluation_report.md"
-            art_md.write_text(html_report)
-            print(f"\n[OK] Updated report artifacts: {art_html} and {art_md}")
+        # Export to external artifact directory if configured or personal agents brain dir
+        jetski_brain = Path("/google/data/rw/personal-agents/fa/fabble/corpagent-eng-fabble/.gemini/jetski/brain/55a3691b-3f1f-48f4-97c1-290c17e18874")
+        if jetski_brain.exists():
+            (jetski_brain / f"{scenario_name}_evaluation_report.html").write_text(html_report)
+            (jetski_brain / f"{scenario_name}_evaluation_report.md").write_text(html_report)
+            print(f"  [OK] Exported to artifact directory: {jetski_brain / f'{scenario_name}_evaluation_report.html'}")
 
     with open(eval_json_path, "w") as f:
         json.dump(master_results, f, indent=2)

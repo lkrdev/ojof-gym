@@ -41,8 +41,21 @@ def collect_lookml_files(directory: Path) -> Dict[str, str]:
     return files
 
 def get_bigquery_table_stats(dataset: str) -> List[Dict[str, Any]]:
-    """Fetches table names and row counts using bq CLI."""
+    """Fetches table names and row counts using bq CLI with persistent file cache."""
+    if not dataset:
+        return []
+
     clean_ds = dataset.replace(".", ":") if ":" not in dataset and "." in dataset else dataset
+    cache_file = PROJECT_ROOT / "eval_exports" / ".bq_table_cache.json"
+    cache = {}
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text())
+            if clean_ds in cache:
+                return cache[clean_ds]
+        except Exception:
+            pass
+
     res = subprocess.run(["bq", "ls", "--max_results=50", clean_ds], capture_output=True, text=True)
     if res.returncode != 0:
         return []
@@ -65,6 +78,14 @@ def get_bigquery_table_stats(dataset: str) -> List[Dict[str, Any]]:
                 except Exception:
                     pass
             tables.append({"table": t_name, "rows": row_count, "size": size_mb})
+
+    try:
+        cache[clean_ds] = tables
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(cache, indent=2))
+    except Exception:
+        pass
+
     return tables
 
 def build_turn1_prompt(scenario_spec: Dict[str, Any]) -> str:
@@ -451,7 +472,7 @@ def run_benchmark(
 
     try:
         from eval.generate_rich_artifacts import process_run_artifacts
-        process_run_artifacts(run_export_dir)
+        process_run_artifacts(run_export_dir, live_eval=True)
     except Exception as e:
         print(f"[Warning] Failed to generate rich artifacts: {e}")
 
