@@ -1,0 +1,42 @@
+{
+  "status": "draft",
+  "title": "TPC-H SF1 Multi-Fact Explore",
+  "description": "Unified OJOF explore combining orders, lineitem_shipped, lineitem_received, and partsupp across distinct grains into a single explore.",
+  "bigquery": {
+    "dataset": "bigquery-public-data.tpch_sf1",
+    "location": "US"
+  },
+  "architecturePrompt": "You are tasked with designing a unified multi-fact LookML modeling layer for the TPC-H Benchmark schema in BigQuery (dataset: `bigquery-public-data.tpch_sf1`). The platform models order placement, line-item shipping and receipt milestones, supplier part inventory, and customer/geography dimensions.\n\nPlease introspect the dataset tables and schemas directly in BigQuery. Note that operational event views (such as `orders`, `lineitem` shipping vs receipt milestones, and `partsupp` inventory) record activities at distinct grains and event lifecycles. Your goal is to design a performant LookML architecture (such as an Outer Join On False / OJOF multi-fact explore named `tpch_unified`) that allows seamless cross-fact reporting across these disparate lifecycles without introducing cartesian fanouts, double-counting, or query performance degradation.",
+  "userQuestions": {
+    "ordersVsShipmentsByNation": {
+      "supported": true,
+      "prompt": "Create a query for an executive dashboard showing total order revenue vs total shipped discount amount grouped by customer nation.",
+      "expectation": {
+        "participatingColumns": [
+          "orders.o_totalprice",
+          "lineitem.l_discount",
+          "customer.c_nationkey",
+          "nation.n_name"
+        ]
+      }
+    },
+    "inventoryVsOrderDemandByRegion": {
+      "supported": true,
+      "prompt": "Create a query comparing total part supply availability cost against total ordered price grouped by region.",
+      "expectation": {
+        "participatingColumns": [
+          "partsupp.ps_supplycost",
+          "orders.o_totalprice",
+          "region.r_name"
+        ]
+      }
+    },
+    "unsupportedIntradayStock": {
+      "supported": false,
+      "prompt": "Show intra-day real-time stock ticks by minute for supplier inventory.",
+      "expectation": {
+        "participatingColumns": []
+      }
+    }
+  }
+}

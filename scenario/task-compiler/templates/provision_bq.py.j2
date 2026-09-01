@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""
+BigQuery Provisioning Script for Scenario: {{ scenario_id }}
+Supports caching/reuse of existing dataset and tables to prevent costly rebuilds.
+"""
+
+import os
+import sys
+
+DATASET_ID = "{{ bigquery.dataset_id }}"
+REUSE_EXISTING = {{ 'True' if bigquery.reuse_existing else 'False' }}
+LOCATION = "{{ bigquery.location or 'US' }}"
+
+def provision():
+    print(f"[Provision BQ] Checking BigQuery dataset '{DATASET_ID}' (reuse_existing={REUSE_EXISTING})...")
+    
+    if REUSE_EXISTING:
+        print(f"[Provision BQ] Table reuse enabled. Checking if tables exist in {DATASET_ID}...")
+        # Check logic: if dataset is public or tables exist, skip creation
+        if DATASET_ID.startswith("bigquery-public-data") or "synth" not in DATASET_ID:
+            print(f"[Provision BQ] Public/Pre-existing dataset '{DATASET_ID}' detected. Skipping DDL execution.")
+            return
+
+    try:
+        from google.cloud import bigquery
+        client = bigquery.Client()
+        dataset_ref = client.dataset(DATASET_ID)
+        try:
+            client.get_dataset(dataset_ref)
+            print(f"[Provision BQ] Dataset {DATASET_ID} already exists.")
+        except Exception:
+            print(f"[Provision BQ] Creating dataset {DATASET_ID} in location {LOCATION}...")
+            dataset = bigquery.Dataset(dataset_ref)
+            dataset.location = LOCATION
+            client.create_dataset(dataset, exists_ok=True)
+
+        # Provisions dummy fact and dimension tables if not existing
+        {% for fact in fact_tables %}
+        sql_fact = """
+        CREATE TABLE IF NOT EXISTS `{{ bigquery.dataset_id }}.{{ fact.name }}` AS
+        SELECT
+          1 AS {{ fact.primary_key if fact.primary_key is string else fact.primary_key[0] }},
+          CURRENT_TIMESTAMP() AS {{ fact.timestamp_column }},
+          100.0 AS amount
+        FROM UNNEST(GENERATE_ARRAY(1, {{ fact.row_count or 100 }})) AS id;
+        """
+        client.query(sql_fact).result()
+        print("[Provision BQ] Verified table '{{ fact.name }}'.")
+        {% endfor %}
+
+    except ImportError:
+        print("[Provision BQ] google-cloud-bigquery library not installed. Skipping live BQ provisioning.")
+
+if __name__ == "__main__":
+    provision()

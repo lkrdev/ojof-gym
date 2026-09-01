@@ -1,0 +1,180 @@
+{
+  "status": "draft",
+  "title": "Controlled Substance Dispensary (Small)",
+  "description": "Multi-center controlled substance dispensing, inventory reconciliation, administration, wastage tracking, and procurement schema for evaluating multi-fact LookML explores.",
+  "bigquery": {
+    "dataset": "ojof_dispensary_small",
+    "location": "US",
+    "anchor_date": "2026-08-31"
+  },
+  "architecturePrompt": "You are tasked with designing a unified multi-fact LookML modeling layer for a multi-center Controlled Substance Dispensary platform in BigQuery. The platform tracks controlled substance lifecycles across medical centers—including cabinet access logs (dispensing), patient dose administrations, wastage records, supplier inventory procurement orders, and daily physical inventory reconciliations.\n\nPlease introspect the dataset tables and schemas directly in BigQuery. Key operational event tables (such as `access_log`, `administration`, `wastage`, `orders`, and `daily_inventory`) record activities at distinct grains and event lifecycles. Your goal is to design a performant LookML architecture (such as an Outer Join On False / OJOF multi-fact explore) that allows seamless cross-fact reporting across these disparate lifecycles without introducing cartesian fanouts, double-counting, or query performance degradation.",
+  "userQuestions": {
+    "dashCenterDailyDispensedCheck": {
+      "supported": true,
+      "prompt": "Create a query for a per-center control dashboard that shows dispensed vs administered/wasted deltas—one row per substance and date.",
+      "expectation": {
+        "participatingColumns": [
+          "access_log.qty_dispensed",
+          "administration.qty_administered",
+          "wastage.qty_wasted",
+          "substances.substance_id",
+          "center.center_id"
+        ]
+      }
+    },
+    "dashCentralDualComparisonAuditBiweekly": {
+      "supported": true,
+      "prompt": "Create a query for a centralized control dashboard that highlights only center & substance pairs that had any variations on any day in the past two calendar weeks either between dispensed vs administered/wasted or between inventory delta and dispensed.",
+      "expectation": {
+        "participatingColumns": [
+          "access_log.qty_dispensed",
+          "administration.qty_administered",
+          "wastage.qty_wasted",
+          "daily_inventory.beginning_qty",
+          "daily_inventory.ending_qty",
+          "substances.substance_id",
+          "center.center_id"
+        ]
+      }
+    },
+    "adhocX": {
+      "supported": true,
+      "prompt": "Did any centers miss any daily inventory checks in the past month for a substance that they have?",
+      "expectation": {
+        "participatingColumns": [
+          "daily_inventory.date",
+          "daily_inventory.substance_id",
+          "daily_inventory.center_id"
+        ]
+      }
+    },
+    "unsupported": {
+      "supported": false,
+      "prompt": "Did any intra-day inventory apparently drop below 0 yesterday?",
+      "expectation": {
+        "participatingColumns": []
+      }
+    }
+  },
+  "tables": {
+    "center": {
+      "rows": 50,
+      "primary_key": ["center_id"],
+      "columns": {
+        "center_id": { "type": "INT64", "generator": "sequence" },
+        "center_name": { "type": "STRING", "generator": "company_name" },
+        "region": { "type": "STRING", "values": ["North", "South", "East", "West", "Central"] },
+        "active": { "type": "BOOLEAN", "default": true }
+      }
+    },
+    "substances": {
+      "rows": 12,
+      "primary_key": ["substance_id"],
+      "columns": {
+        "substance_id": { "type": "INT64", "generator": "sequence" },
+        "substance_name": { "type": "STRING", "values": ["Morphine", "Fentanyl", "Oxycodone", "Hydromorphone", "Methadone", "Diazepam", "Lorazepam", "Midazolam", "Ketamine", "Buprenorphine", "Codeine", "Hydrocodone"] },
+        "dea_schedule": { "type": "STRING", "values": ["Schedule II", "Schedule III", "Schedule IV"] },
+        "unit_of_measure": { "type": "STRING", "values": ["mg", "mcg", "ml"] }
+      }
+    },
+    "users": {
+      "rows": 250,
+      "primary_key": ["user_id"],
+      "columns": {
+        "user_id": { "type": "INT64", "generator": "sequence" },
+        "user_name": { "type": "STRING", "generator": "full_name" },
+        "role": { "type": "STRING", "values": ["Pharmacist", "Nurse", "Inventory_Auditor", "Physician"] },
+        "center_id": { "type": "INT64", "foreign_key": "center.center_id" },
+        "enabled": { "type": "BOOLEAN", "default": true }
+      }
+    },
+    "orders": {
+      "description": "Supplier purchase orders for restocking substance inventory at medical centers.",
+      "rows": 100000,
+      "primary_key": ["order_id"],
+      "columns": {
+        "order_id": { "type": "INT64", "generator": "sequence" },
+        "order_timestamp": { "type": "TIMESTAMP", "start_date": "2026-01-01", "end_date": "2026-08-31" },
+        "center_id": { "type": "INT64", "foreign_key": "center.center_id" },
+        "prescriber_user_id": { "type": "INT64", "foreign_key": "users.user_id" },
+        "status": { "type": "STRING", "values": ["ACTIVE", "COMPLETED", "DISCONTINUED"] }
+      }
+    },
+    "order_items": {
+      "rows": 200000,
+      "primary_key": ["order_item_id"],
+      "columns": {
+        "order_item_id": { "type": "INT64", "generator": "sequence" },
+        "order_id": { "type": "INT64", "foreign_key": "orders.order_id" },
+        "substance_id": { "type": "INT64", "foreign_key": "substances.substance_id" },
+        "qty_ordered": { "type": "NUMERIC", "min": 1.0, "max": 50.0 }
+      }
+    },
+    "daily_inventory": {
+      "description": "Daily physical inventory snapshots.",
+      "rows": 350000,
+      "primary_key": ["date", "substance_id", "center_id"],
+      "columns": {
+        "date": { "type": "DATE", "start_date": "2026-01-01", "end_date": "2026-08-31" },
+        "substance_id": { "type": "INT64", "foreign_key": "substances.substance_id" },
+        "center_id": { "type": "INT64", "foreign_key": "center.center_id" },
+        "beginning_qty": { "type": "NUMERIC", "min": 100.0, "max": 5000.0 },
+        "ending_qty": { 
+          "type": "NUMERIC", 
+          "formula": "beginning_qty + sum(access_log.qty_stocked) - sum(access_log.qty_dispensed)",
+          "variance_rate": 0.02
+        },
+        "inventoried_by_user_id": { "type": "INT64", "foreign_key": "users.user_id" }
+      }
+    },
+    "access_log": {
+      "description": "Dispensing cabinet access logs recording stock additions, inventory checks, and patient dose dispensing.",
+      "rows": 500000,
+      "primary_key": ["access_log_id"],
+      "columns": {
+        "access_log_id": { "type": "INT64", "generator": "sequence" },
+        "timestamp": { "type": "TIMESTAMP", "start_date": "2026-01-01", "end_date": "2026-08-31" },
+        "center_id": { "type": "INT64", "foreign_key": "center.center_id" },
+        "substance_id": { "type": "INT64", "foreign_key": "substances.substance_id" },
+        "user_id": { "type": "INT64", "foreign_key": "users.user_id" },
+        "qty_stocked": { "type": "NUMERIC", "min": 0.0, "max": 500.0 },
+        "qty_inventoried": { "type": "NUMERIC", "min": 0.0, "max": 5000.0 },
+        "qty_dispensed": { "type": "NUMERIC", "min": 0.0, "max": 50.0 },
+        "access_purpose": { "type": "STRING", "values": ["RESTOCK", "DISPENSE", "INVENTORY_CHECK", "RETURN"] }
+      }
+    },
+    "administration": {
+      "description": "Patient dose administration events.",
+      "rows": 400000,
+      "primary_key": ["admin_id"],
+      "columns": {
+        "admin_id": { "type": "INT64", "generator": "sequence" },
+        "timestamp": { "type": "TIMESTAMP", "start_date": "2026-01-01", "end_date": "2026-08-31" },
+        "center_id": { "type": "INT64", "foreign_key": "center.center_id" },
+        "substance_id": { "type": "INT64", "foreign_key": "substances.substance_id" },
+        "order_item_id": { "type": "INT64", "foreign_key": "order_items.order_item_id" },
+        "user_id": { "type": "INT64", "foreign_key": "users.user_id" },
+        "qty_administered": { 
+          "type": "NUMERIC", 
+          "formula": "access_log.qty_dispensed - wastage.qty_wasted",
+          "variance_rate": 0.02
+        }
+      }
+    },
+    "wastage": {
+      "description": "Partial dose or expired substance wastage records.",
+      "rows": 50000,
+      "primary_key": ["waste_id"],
+      "columns": {
+        "waste_id": { "type": "INT64", "generator": "sequence" },
+        "timestamp": { "type": "TIMESTAMP", "start_date": "2026-01-01", "end_date": "2026-08-31" },
+        "center_id": { "type": "INT64", "foreign_key": "center.center_id" },
+        "substance_id": { "type": "INT64", "foreign_key": "substances.substance_id" },
+        "user_id": { "type": "INT64", "foreign_key": "users.user_id" },
+        "witness_user_id": { "type": "INT64", "foreign_key": "users.user_id" },
+        "qty_wasted": { "type": "NUMERIC", "min": 0.1, "max": 10.0 },
+        "waste_reason": { "type": "STRING", "values": ["PARTIAL_DOSE", "CONTAMINATED", "EXPIRED", "DROPPED"] }
+      }
+    }
+  }
+}
