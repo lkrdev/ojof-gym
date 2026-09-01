@@ -2,3 +2,7 @@
 .bak # Working directory only files
 __pycache__
 logs/
+eval_exports/
+.venv/
+*.bundle
+*.sock
