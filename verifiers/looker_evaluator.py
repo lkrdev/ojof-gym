@@ -103,18 +103,20 @@ class LookerEvaluator:
 
         for rel_name, fpath in file_map.items():
             content = fpath.read_text()
-            # Normalize includes to flat match
-            content = re.sub(r'include:\s*["\']/[^"\']*/(\*\.view\.lkml)["\']', r'include: "\1"', content)
-            content = re.sub(r'include:\s*["\']/[^"\']*/(\*\.explore\.lkml)["\']', r'include: "\1"', content)
-            content = re.sub(r'include:\s*["\'](\w+\.view\.lkml)["\']', r'include: "\1"', content)
+            content = re.sub(r'include:\s*["\']/?(?:views/|explores/)?[^"\']*/(\*\.view(?:\.lkml)?)["\']', r'include: "\1"', content)
+            content = re.sub(r'include:\s*["\']/?(?:views/|explores/)?[^"\']*/(\*\.explore(?:\.lkml)?)["\']', r'include: "\1"', content)
+            content = re.sub(r'include:\s*["\']/?views/([^"\']+\.view(?:\.lkml)?)["\']', r'include: "\1"', content)
             
             # Normalize connection name to sandbox connection
             if rel_name.endswith(".model.lkml"):
                 content = re.sub(r'connection:\s*["\'][^"\']+["\']', f'connection: "{self.connection_name}"', content)
-                if 'include: "*.view.lkml"' not in content:
+                if 'include: "*.view.lkml"' not in content and 'include: "*.view"' not in content:
                     content = 'include: "*.view.lkml"\n' + content
-                if 'include: "*.explore.lkml"' not in content:
+                if 'include: "*.explore.lkml"' not in content and 'include: "*.explore"' not in content:
                     content = 'include: "*.explore.lkml"\n' + content
+            elif rel_name.endswith(".explore.lkml"):
+                if 'include: "*.view.lkml"' not in content and 'include: "*.view"' not in content:
+                    content = 'include: "*.view.lkml"\n' + content
 
             with tempfile.NamedTemporaryFile("w", suffix=".lkml", delete=False) as tf:
                 tf.write(content)

@@ -943,49 +943,33 @@ def generate_html_report_with_artifacts(
     # 4. MODEL MAINTAINABILITY
     # ==================================================================
     lines.append('  <a id="4-model-maintainability"></a>')
-    lines.append('  <h2>4. Model Maintainability</h2>')
-    lines.append('  <p>Effort and code friction required to extend the greenfield model (Turn 1) to satisfy new dashboard queries (Turn 2):</p>')
+    lines.append('  <h2>4. Incremental Model Maintainability</h2>')
+    lines.append('  <p>Effort, token overhead, and code friction required to extend the greenfield model across sequential query evaluation turns:</p>')
+
+    t1_tok_w = m_with.get('turn1_tokens', 0)
+    t1_tok_n = m_no.get('turn1_tokens', 0)
+    q_tok_w = m_with.get('query_turns_tokens', m_with.get('turn2_tokens', 0))
+    q_tok_n = m_no.get('query_turns_tokens', m_no.get('turn2_tokens', 0))
+    tot_tok_with = t1_tok_w + q_tok_w
+    tot_tok_no = t1_tok_n + q_tok_n
 
     lines.append('  <table>')
     lines.append('    <thead><tr><th>Maintenance Metric</th><th>Baseline (No Skill)</th><th>With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
     lines.append('    <tbody>')
-    if t1_tok_n <= t1_tok_w:
-        lines.append(f'      <tr><td><strong>Turn 1 Initial Tokens</strong></td><td><strong>{t1_tok_n:,}</strong></td><td>{t1_tok_w:,}<br>{format_pct_delta(t1_tok_w, t1_tok_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Turn 1 Initial Tokens</strong></td><td>{t1_tok_n:,}</td><td><strong>{t1_tok_w:,}</strong><br>{format_pct_delta(t1_tok_w, t1_tok_n, reverse_is_better=True)}</td></tr>')
-
-    if t2_tok_w < t2_tok_n:
-        lines.append(f'      <tr><td><strong>Turn 2 Maintenance Tokens</strong></td><td>{t2_tok_n:,}</td><td><strong>{t2_tok_w:,}</strong><br>{format_pct_delta(t2_tok_w, t2_tok_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Turn 2 Maintenance Tokens</strong></td><td><strong>{t2_tok_n:,}</strong></td><td>{t2_tok_w:,}<br>{format_pct_delta(t2_tok_w, t2_tok_n, reverse_is_better=True)}</td></tr>')
-
-    if tot_tok_with < tot_tok_no:
-        lines.append(f'      <tr><td><strong>Total Token Consumption</strong></td><td>{tot_tok_no:,}</td><td><strong>{tot_tok_with:,}</strong><br>{format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Total Token Consumption</strong></td><td><strong>{tot_tok_no:,}</strong></td><td>{tot_tok_with:,}<br>{format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)}</td></tr>')
-
-    if added_w < added_n:
-        lines.append(f'      <tr><td><strong>Lines Added in Turn 2</strong></td><td>+{added_n}</td><td><strong>+{added_w}</strong><br>{format_pct_delta(added_w, added_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Lines Added in Turn 2</strong></td><td><strong>+{added_n}</strong></td><td>+{added_w}<br>{format_pct_delta(added_w, added_n, reverse_is_better=True)}</td></tr>')
-
-    lines.append(f'      <tr><td><strong>Lines Deleted in Turn 2</strong></td><td>-{del_n}</td><td>-{del_w}</td></tr>')
-
-    if lines_w < lines_n:
-        lines.append(f'      <tr><td><strong>Total Lines Refactored</strong></td><td>{lines_n} lines</td><td><strong>{lines_w} lines</strong><br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Total Lines Refactored</strong></td><td><strong>{lines_n} lines</strong></td><td>{lines_w} lines<br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td></tr>')
+    lines.append(f'      <tr><td><strong>Turn 1 (Greenfield) Tokens</strong></td><td>{t1_tok_n:,}</td><td><strong>{t1_tok_w:,}</strong><br>{format_pct_delta(t1_tok_w, t1_tok_n, reverse_is_better=True)}</td></tr>')
+    lines.append(f'      <tr><td><strong>Query Turns (2 to N) Tokens</strong></td><td>{q_tok_n:,}</td><td><strong>{q_tok_w:,}</strong><br>{format_pct_delta(q_tok_w, q_tok_n, reverse_is_better=True)}</td></tr>')
+    lines.append(f'      <tr><td><strong>Total Token Consumption</strong></td><td>{tot_tok_no:,}</td><td><strong>{tot_tok_with:,}</strong><br>{format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)}</td></tr>')
+    lines.append(f'      <tr><td><strong>Queries Served Without LookML Changes</strong></td><td>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</td><td><strong>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})</strong><br>{format_pct_delta(pct_served_w, pct_served_n, reverse_is_better=False)}</td></tr>')
+    lines.append(f'      <tr><td><strong>Avg. Lines Modified per Query Turn</strong></td><td>{avg_lines_n:.1f} lines/query</td><td><strong>{avg_lines_w:.1f} lines/query</strong><br>{format_pct_delta(avg_lines_w, avg_lines_n, reverse_is_better=True)}</td></tr>')
+    lines.append(f'      <tr><td><strong>Cumulative Lines Refactored (Churn)</strong></td><td>{lines_n} lines (+{added_n} / -{del_n})</td><td><strong>{lines_w} lines (+{added_w} / -{del_w})</strong><br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td></tr>')
 
     mod_files_w = ', '.join(m_with.get('modified_files', [])) or 'None'
     mod_files_n = ', '.join(m_no.get('modified_files', [])) or 'None'
-    if files_n <= files_w:
-        lines.append(f'      <tr><td><strong>Files Modified in Turn 2</strong></td><td><strong>{files_n} files</strong> ({html.escape(mod_files_n)})</td><td>{files_w} files ({html.escape(mod_files_w)})<br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Files Modified in Turn 2</strong></td><td>{files_n} files ({html.escape(mod_files_n)})</td><td><strong>{files_w} files</strong> ({html.escape(mod_files_w)})<br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td></tr>')
+    lines.append(f'      <tr><td><strong>Files Modified Across Query Turns</strong></td><td>{files_n} files ({html.escape(mod_files_n)})</td><td>{files_w} files ({html.escape(mod_files_w)})</td></tr>')
     lines.append('    </tbody>')
     lines.append('  </table>')
 
-    lines.append('  <h3>Refactoring Diffs (Turn 1 &rarr; Turn 2, Side-by-Side)</h3>')
+    lines.append('  <h3>Cumulative Model Refactoring Diffs (Turn 1 &rarr; Final Model, Side-by-Side)</h3>')
     w_diff_path = export_dir / "with_skill" / "model_refactoring.diff"
     w_diff_text = w_diff_path.read_text().strip() if w_diff_path.exists() else "(No diff available)"
     n_diff_path = export_dir / "no_skill" / "model_refactoring.diff"
@@ -994,8 +978,8 @@ def generate_html_report_with_artifacts(
     lines.append('  <table class="side-by-side-table">')
     lines.append('    <thead>')
     lines.append('      <tr>')
-    lines.append('        <th class="col-base">Baseline (No Skill) Unified Diff</th>')
-    lines.append('        <th class="col-skill">With Skill (<code>lookml-ojof</code>) Unified Diff</th>')
+    lines.append('        <th class="col-base">Baseline (No Skill) Cumulative Diff</th>')
+    lines.append('        <th class="col-skill">With Skill (<code>lookml-ojof</code>) Cumulative Diff</th>')
     lines.append('      </tr>')
     lines.append('    </thead>')
     lines.append('    <tbody>')
@@ -1200,31 +1184,34 @@ def generate_html_report_with_artifacts(
             lines.append('    </tbody>')
             lines.append('  </table>')
 
-        # Inline Performance table
-        lines.append(f'  <p style="margin-top: 8px; margin-bottom: 4px; font-weight: 600;">Performance for <code>{html.escape(qk)}</code>:</p>')
-        lines.append('  <table>')
-        lines.append('    <thead><tr><th style="width: 44%;">Performance Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
-        lines.append('    <tbody>')
+        has_w_sql = bool(qw_sql_clean and qw_sql_clean != "(SQL compilation skipped or failed)")
+        has_n_sql = bool(qn_sql_clean and qn_sql_clean != "(SQL compilation skipped or failed)")
 
-        if w_lat and n_lat and w_lat < n_lat:
-            lines.append(f'      <tr><td><strong>Client Latency</strong></td><td>{n_lat} ms</td><td><strong>{w_lat} ms</strong><br>{format_pct_delta(w_lat, n_lat, reverse_is_better=True)}</td></tr>')
+        if not has_w_sql and not has_n_sql:
+            lines.append(f'  <div style="font-size: 12px; color: #5f6368; font-style: italic; margin-top: 6px; padding: 6px 10px; background: #f8f9fa; border-radius: 4px; border: 1px solid #e8eaed;">BigQuery execution skipped because SQL compilation failed on both models.</div>')
         else:
-            lines.append(f'      <tr><td><strong>Client Latency</strong></td><td><strong>{n_lat} ms</strong></td><td>{w_lat} ms<br>{format_pct_delta(w_lat, n_lat, reverse_is_better=True)}</td></tr>')
+            # Inline Performance table
+            lines.append(f'  <p style="margin-top: 8px; margin-bottom: 4px; font-weight: 600;">Performance for <code>{html.escape(qk)}</code>:</p>')
+            lines.append('  <table>')
+            lines.append('    <thead><tr><th style="width: 44%;">Performance Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
+            lines.append('    <tbody>')
 
-        if w_scanned < n_scanned and w_scanned > 0:
-            lines.append(f'      <tr><td><strong>Bytes Scanned</strong></td><td>{n_bytes_str}</td><td><strong>{w_bytes_str}</strong><br>{format_pct_delta(w_scanned, n_scanned, reverse_is_better=True)}</td></tr>')
-        else:
-            lines.append(f'      <tr><td><strong>Bytes Scanned</strong></td><td><strong>{n_bytes_str}</strong></td><td>{w_bytes_str}</td></tr>')
+            n_lat_str = f"{n_lat} ms" if has_n_sql and n_lat else "N/A"
+            w_lat_str = f"{w_lat} ms" if has_w_sql and w_lat else "N/A"
+            lines.append(f'      <tr><td><strong>Client Latency</strong></td><td>{n_lat_str}</td><td>{w_lat_str}</td></tr>')
 
-        if w_shuf < n_shuf and w_shuf > 0:
-            lines.append(f'      <tr><td><strong>Bytes Shuffled (Intermediate Data)</strong></td><td>{n_shuf_str}</td><td><strong>{w_shuf_str}</strong><br>{format_pct_delta(w_shuf, n_shuf, reverse_is_better=True)}</td></tr>')
-        else:
-            lines.append(f'      <tr><td><strong>Bytes Shuffled (Intermediate Data)</strong></td><td><strong>{n_shuf_str}</strong></td><td>{w_shuf_str}</td></tr>')
+            n_scan_str = n_bytes_str if has_n_sql else "N/A"
+            w_scan_str = w_bytes_str if has_w_sql else "N/A"
+            lines.append(f'      <tr><td><strong>Bytes Scanned</strong></td><td>{n_scan_str}</td><td>{w_scan_str}</td></tr>')
 
-        lines.append(f'      <tr><td><strong>Spill to Disk / Memory Overflow</strong></td><td><strong>{n_spill_str}</strong></td><td><strong>{w_spill_str}</strong></td></tr>')
-        lines.append(f'      <tr><td><strong>BigQuery Job Dashboard</strong></td><td>{n_link}</td><td>{w_link}</td></tr>')
-        lines.append('    </tbody>')
-        lines.append('  </table>')
+            n_shuf_s = n_shuf_str if has_n_sql else "N/A"
+            w_shuf_s = w_shuf_str if has_w_sql else "N/A"
+            lines.append(f'      <tr><td><strong>Bytes Shuffled (Intermediate Data)</strong></td><td>{n_shuf_s}</td><td>{w_shuf_s}</td></tr>')
+
+            lines.append(f'      <tr><td><strong>Spill to Disk / Memory Overflow</strong></td><td>{n_spill_str if has_n_sql else "N/A"}</td><td>{w_spill_str if has_w_sql else "N/A"}</td></tr>')
+            lines.append(f'      <tr><td><strong>BigQuery Job Dashboard</strong></td><td>{n_link if has_n_sql else "N/A"}</td><td>{w_link if has_w_sql else "N/A"}</td></tr>')
+            lines.append('    </tbody>')
+            lines.append('  </table>')
 
     # ==================================================================
     # 6. AGGREGATE PERFORMANCE
@@ -1233,27 +1220,30 @@ def generate_html_report_with_artifacts(
     lines.append('  <h2>6. Aggregate Performance</h2>')
     lines.append('  <p>Aggregate warehouse resource consumption across all evaluated test queries. In BigQuery, cartesian products caused by unisolated multi-fact joins manifest as <strong>elevated intermediate shuffle output bytes</strong> and stage record redistribution:</p>')
 
-    lines.append('  <table>')
-    lines.append('    <thead><tr><th style="width: 44%;">Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
-    lines.append('    <tbody>')
-    if tot_scanned_w_mb <= tot_scanned_n_mb:
-        lines.append(f'      <tr><td><strong>Total Bytes Scanned</strong></td><td>{tot_scanned_n_mb:.2f} MB</td><td><strong>{tot_scanned_w_mb:.2f} MB</strong><br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td></tr>')
+    if tot_scanned_w_bytes == 0 and tot_scanned_n_bytes == 0:
+        lines.append('  <div style="font-size: 13.5px; color: #5f6368; padding: 12px 16px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e8eaed;">No queries completed live BigQuery execution across test models.</div>')
     else:
-        lines.append(f'      <tr><td><strong>Total Bytes Scanned</strong></td><td><strong>{tot_scanned_n_mb:.2f} MB</strong></td><td>{tot_scanned_w_mb:.2f} MB<br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td></tr>')
+        lines.append('  <table>')
+        lines.append('    <thead><tr><th style="width: 44%;">Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
+        lines.append('    <tbody>')
+        if tot_scanned_w_mb <= tot_scanned_n_mb:
+            lines.append(f'      <tr><td><strong>Total Bytes Scanned</strong></td><td>{tot_scanned_n_mb:.2f} MB</td><td><strong>{tot_scanned_w_mb:.2f} MB</strong><br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td></tr>')
+        else:
+            lines.append(f'      <tr><td><strong>Total Bytes Scanned</strong></td><td><strong>{tot_scanned_n_mb:.2f} MB</strong></td><td>{tot_scanned_w_mb:.2f} MB<br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td></tr>')
 
-    if tot_shuf_w_kb < tot_shuf_n_kb:
-        lines.append(f'      <tr><td><strong>Total Shuffle Output (Intermediate Data)</strong></td><td>{tot_shuf_n_kb:.1f} KB</td><td><strong>{tot_shuf_w_kb:.1f} KB</strong><br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Total Shuffle Output (Intermediate Data)</strong></td><td><strong>{tot_shuf_n_kb:.1f} KB</strong></td><td>{tot_shuf_w_kb:.1f} KB<br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td></tr>')
+        if tot_shuf_w_kb < tot_shuf_n_kb:
+            lines.append(f'      <tr><td><strong>Total Shuffle Output (Intermediate Data)</strong></td><td>{tot_shuf_n_kb:.1f} KB</td><td><strong>{tot_shuf_w_kb:.1f} KB</strong><br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td></tr>')
+        else:
+            lines.append(f'      <tr><td><strong>Total Shuffle Output (Intermediate Data)</strong></td><td><strong>{tot_shuf_n_kb:.1f} KB</strong></td><td>{tot_shuf_w_kb:.1f} KB<br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td></tr>')
 
-    lines.append('      <tr><td><strong>Spill to Disk / Memory Overflow</strong></td><td><strong>0 B (Clean)</strong></td><td><strong>0 B (Clean)</strong><br><span class="delta delta-neutral">0 B (0.0%)</span></td></tr>')
+        lines.append('      <tr><td><strong>Spill to Disk / Memory Overflow</strong></td><td><strong>0 B (Clean)</strong></td><td><strong>0 B (Clean)</strong><br><span class="delta delta-neutral">0 B (0.0%)</span></td></tr>')
 
-    if avg_lat_w < avg_lat_n:
-        lines.append(f'      <tr><td><strong>Average Client Latency</strong></td><td>{avg_lat_n:,} ms</td><td><strong>{avg_lat_w:,} ms</strong><br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Average Client Latency</strong></td><td><strong>{avg_lat_n:,} ms</strong></td><td>{avg_lat_w:,} ms<br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
-    lines.append('    </tbody>')
-    lines.append('  </table>')
+        if avg_lat_w < avg_lat_n:
+            lines.append(f'      <tr><td><strong>Average Client Latency</strong></td><td>{avg_lat_n:,} ms</td><td><strong>{avg_lat_w:,} ms</strong><br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
+        else:
+            lines.append(f'      <tr><td><strong>Average Client Latency</strong></td><td><strong>{avg_lat_n:,} ms</strong></td><td>{avg_lat_w:,} ms<br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
+        lines.append('    </tbody>')
+        lines.append('  </table>')
 
     # ==================================================================
     # 7. ARTIFACT INDEX

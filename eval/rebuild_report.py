@@ -33,6 +33,7 @@ def rebuild_run_report(
     re_verify_looker: bool = True
 ):
     print(f"[Report Rebuilder] Rebuilding report from saved artifacts in: {run_dir}")
+    eval_json_path = run_dir / "eval_results.json"
     master_results = {"tasks": []}
     if eval_json_path.exists() and eval_json_path.stat().st_size > 0:
         try:
@@ -40,6 +41,14 @@ def rebuild_run_report(
                 master_results = json.load(f)
         except Exception as e:
             print(f"  [Warning] Could not parse {eval_json_path}: {e}")
+
+    try:
+        from eval.generate_rich_artifacts import process_run_artifacts
+        process_run_artifacts(run_dir)
+        print("[Report Rebuilder] Successfully rebuilt rich HTML/Markdown artifacts.")
+        return
+    except Exception as e:
+        print(f"  [Warning] process_run_artifacts encountered: {e}")
 
     if not master_results.get("tasks"):
         # Auto-discover task folders
