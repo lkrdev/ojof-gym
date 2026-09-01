@@ -9,6 +9,7 @@ Measures maintainability, structural invariants, Looker project validation, and 
 
 import argparse
 import datetime
+import difflib
 import json
 import os
 import shutil
@@ -123,37 +124,115 @@ def run_multi_turn_mode_evaluation(
     turn1_lookml = collect_lookml_files(workspace_dir)
     print(f"  -> [Turn 1 Complete] LookML Files: {len(turn1_lookml)} | Tokens: {turn1_res.get('usage', {}).get('total_tokens', 0)}")
 
-    # ----------------------------------------------------
-    # TURN 2: Dashboard Maintenance & Extension
-    # ----------------------------------------------------
-    turn2_prompt = build_turn2_prompt(scenario_spec)
-    print(f"  -> [Turn 2] Dashboard Queries Maintenance Prompt...")
-    turn2_res = driver.execute_turn(
-        workspace_dir=workspace_dir,
-        prompt=turn2_prompt,
-        turn_num=2,
-        skill_mode=skill_mode,
-        dry_run=dry_run,
-        conversation_id=turn1_res.get("conversation_id")
-    )
-    turn2_lookml = collect_lookml_files(workspace_dir)
-    print(f"  -> [Turn 2 Complete] LookML Files: {len(turn2_lookml)} | Tokens: {turn2_res.get('usage', {}).get('total_tokens', 0)}")
-
-    # Diff metrics between Turn 1 and Turn 2
-    diff_metrics = compute_lookml_diff(turn1_lookml, turn2_lookml)
-    print(f"  -> [Refactoring Friction] Lines Changed: {diff_metrics['total_lines_changed']} (+{diff_metrics['lines_added']} / -{diff_metrics['lines_deleted']}) across {len(diff_metrics['modified_files'])} modified files")
+    conversation_id = turn1_res.get("conversation_id")
 
     # ----------------------------------------------------
-    # VERIFICATION ON FINAL MODEL (Turn 2)
+    # INCREMENTAL QUERY TURNS (Turns 2 to N+1): One Query Per Turn
+    # ----------------------------------------------------
+    user_questions = scenario_spec.get("userQuestions", {})
+    query_turns_results = {}
+    supported_queries = [
+        (qk, qval) for qk, qval in user_questions.items() if qval.get("supported", True)
+    ]
+
+    turn_counter = 2
+    queries_served_without_changes = 0
+    total_query_lines_changed = 0
+    total_query_tokens = 0
+    total_query_duration = 0
+
+    for qk, qval in supported_queries:
+        prompt_text = qval.get("prompt", "")
+        q_prompt = (
+            f"Business Analytics Request for Query '{qk}':\n"
+            f"Requirement: \"{prompt_text}\"\n\n"
+            f"Please determine if your existing LookML model already supports this query requirement:\n"
+            f"- If YES (no LookML changes needed), output the exact Looker query payload JSON for this query (specifying 'model', 'view', 'fields', and optional 'filters').\n"
+            f"- If NO (incremental LookML changes needed), first update or create the required `.view.lkml` / `.explore.lkml` files in your workspace, and then output the Looker query payload JSON."
+        )
+
+        pre_query_lookml = collect_lookml_files(workspace_dir)
+        print(f"  -> [Query Turn {turn_counter}] Evaluating Query '{qk}'...")
+
+        q_turn_res = driver.execute_turn(
+            workspace_dir=workspace_dir,
+            prompt=q_prompt,
+            turn_num=turn_counter,
+            skill_mode=skill_mode,
+            dry_run=dry_run,
+            conversation_id=conversation_id
+        )
+        if q_turn_res.get("conversation_id"):
+            conversation_id = q_turn_res["conversation_id"]
+
+        q_tokens = q_turn_res.get("usage", {}).get("total_tokens", 0)
+        q_duration = q_turn_res.get("duration_seconds", 0)
+        total_query_tokens += q_tokens
+        total_query_duration += q_duration
+
+        post_query_lookml = collect_lookml_files(workspace_dir)
+        q_diff = compute_lookml_diff(pre_query_lookml, post_query_lookml)
+
+        lines_changed = q_diff["total_lines_changed"]
+        total_query_lines_changed += lines_changed
+        served_without_changes = (lines_changed == 0)
+        if served_without_changes:
+            queries_served_without_changes += 1
+
+        print(f"     [Query '{qk}'] Lines Changed: {lines_changed} (+{q_diff['lines_added']} / -{q_diff['lines_deleted']}) | Served Without Changes: {served_without_changes}")
+
+        # Compute turn diff text
+        diff_text_lines = []
+        for k in sorted(list(set(pre_query_lookml.keys()) | set(post_query_lookml.keys()))):
+            f1 = pre_query_lookml.get(k, "")
+            f2 = post_query_lookml.get(k, "")
+            if f1 != f2:
+                diff_text_lines.extend(difflib.unified_diff(
+                    f1.splitlines(keepends=True),
+                    f2.splitlines(keepends=True),
+                    fromfile=f"a/{k}",
+                    tofile=f"b/{k}"
+                ))
+        turn_diff_str = "".join(diff_text_lines)
+
+        query_turns_results[qk] = {
+            "turn_num": turn_counter,
+            "prompt": prompt_text,
+            "driver_result": q_turn_res,
+            "lines_added": q_diff["lines_added"],
+            "lines_deleted": q_diff["lines_deleted"],
+            "total_lines_changed": lines_changed,
+            "modified_files": q_diff["modified_files"],
+            "new_files": q_diff["new_files"],
+            "served_without_changes": served_without_changes,
+            "diff_text": turn_diff_str
+        }
+
+        turn_counter += 1
+
+    final_lookml = collect_lookml_files(workspace_dir)
+    cumulative_diff = compute_lookml_diff(turn1_lookml, final_lookml)
+
+    num_supported = len(supported_queries) if supported_queries else 1
+    pct_served_without_changes = (queries_served_without_changes / num_supported) * 100.0
+    avg_lines_per_query = total_query_lines_changed / num_supported
+
+    print(f"\n  [Incremental Evaluation Summary] {skill_mode}:")
+    print(f"    - Queries Served Without LookML Changes: {queries_served_without_changes}/{num_supported} ({pct_served_without_changes:.1f}%)")
+    print(f"    - Avg. Lines Modified per Query: {avg_lines_per_query:.1f}")
+    print(f"    - Cumulative Refactoring Lines: {cumulative_diff['total_lines_changed']}")
+
+    # ----------------------------------------------------
+    # VERIFICATION ON FINAL MODEL
     # ----------------------------------------------------
     # Level 1: Structural Invariants Linter
     linter_res = audit_lookml_directory(workspace_dir)
     print(f"  [Level 1 Linter] Score: {linter_res['score']:.1f}% ({linter_res['passed']}/{linter_res['total']}) | Engine: {linter_res['engine']}")
 
     # Level 2: Looker Project Validation
-    looker_val = {"is_valid": False, "skipped": True, "reason": "No LookML files generated" if not turn2_lookml else "Looker unavailable"}
+    looker_val = {"is_valid": False, "skipped": True, "reason": "No LookML files generated" if not final_lookml else "Looker unavailable"}
     looker_queries = {}
-    if looker_eval.is_available() and turn2_lookml:
+    if looker_eval.is_available() and final_lookml:
         print(f"  [Level 2 Looker] Syncing model to Looker dev workspace...")
         sync_res = looker_eval.sync_files_to_looker(workspace_dir)
         print(f"  [Level 2 Looker] Validating project...")
@@ -177,22 +256,24 @@ def run_multi_turn_mode_evaluation(
             "driver_result": turn1_res,
             "lookml_files": turn1_lookml
         },
-        "turn2": {
-            "driver_result": turn2_res,
-            "lookml_files": turn2_lookml
-        },
+        "query_turns": query_turns_results,
         "maintainability_metrics": {
             "turn1_tokens": turn1_res.get("usage", {}).get("total_tokens", 0),
-            "turn2_tokens": turn2_res.get("usage", {}).get("total_tokens", 0),
+            "query_turns_tokens": total_query_tokens,
             "turn1_duration_seconds": turn1_res.get("duration_seconds", 0),
-            "turn2_duration_seconds": turn2_res.get("duration_seconds", 0),
-            "lines_added": diff_metrics["lines_added"],
-            "lines_deleted": diff_metrics["lines_deleted"],
-            "total_lines_changed": diff_metrics["total_lines_changed"],
-            "modified_files": diff_metrics["modified_files"],
-            "new_files": diff_metrics["new_files"]
+            "query_turns_duration_seconds": total_query_duration,
+            "queries_served_without_changes": queries_served_without_changes,
+            "total_supported_queries": num_supported,
+            "pct_queries_served_without_changes": pct_served_without_changes,
+            "avg_lines_modified_per_query": avg_lines_per_query,
+            "total_query_lines_changed": total_query_lines_changed,
+            "lines_added": cumulative_diff["lines_added"],
+            "lines_deleted": cumulative_diff["lines_deleted"],
+            "total_lines_changed": cumulative_diff["total_lines_changed"],
+            "modified_files": cumulative_diff["modified_files"],
+            "new_files": cumulative_diff["new_files"]
         },
-        "final_lookml_files": turn2_lookml,
+        "final_lookml_files": final_lookml,
         "linter_results": linter_res,
         "looker_validation": looker_val,
         "looker_queries": looker_queries
@@ -331,6 +412,12 @@ def run_benchmark(
 
     with open(run_export_dir / "eval_results.json", "w") as f:
         json.dump(all_results, f, indent=2)
+
+    try:
+        from eval.generate_rich_artifacts import process_run_artifacts
+        process_run_artifacts(run_export_dir)
+    except Exception as e:
+        print(f"[Warning] Failed to generate rich artifacts: {e}")
 
     print(f"\n=======================================================")
     print(f"[Benchmark Runner COMPLETED]")

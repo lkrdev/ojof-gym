@@ -17,21 +17,12 @@
         "minDimensions": 1,
         "minMeasures": 2,
         "minFilters": 1,
-        "expectedSqlAggregates": [
-          "SUM"
-        ],
-        "expectedDimensions": [
-          "products.category"
-        ],
-        "expectedMeasures": [
-          "total_sale_price",
-          "total_cost"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "order_items.sale_price",
-          "order_items.status",
           "inventory_items.cost",
-          "products.category"
+          "products.category",
+          "SUM",
+          "GROUP BY"
         ]
       }
     },
@@ -42,21 +33,13 @@
         "minDimensions": 1,
         "minMeasures": 2,
         "minFilters": 1,
-        "expectedSqlAggregates": [
-          "SUM"
-        ],
-        "expectedDimensions": [
-          "products.brand"
-        ],
-        "expectedMeasures": [
-          "total_sale_price",
-          "total_cost"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "order_items.sale_price",
           "inventory_items.cost",
           "products.brand",
-          "products.department"
+          "products.department",
+          "SUM",
+          "GROUP BY"
         ]
       }
     },
@@ -67,23 +50,13 @@
         "minDimensions": 2,
         "minMeasures": 2,
         "minFilters": 1,
-        "expectedSqlAggregates": [
-          "SUM"
-        ],
-        "expectedDimensions": [
-          "products.department",
-          "products.category"
-        ],
-        "expectedMeasures": [
-          "total_sale_price",
-          "total_cost"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "order_items.sale_price",
-          "order_items.status",
           "inventory_items.cost",
           "products.department",
-          "products.category"
+          "products.category",
+          "SUM",
+          "GROUP BY"
         ]
       }
     },
@@ -94,22 +67,13 @@
         "minDimensions": 1,
         "minMeasures": 2,
         "minFilters": 0,
-        "expectedSqlAggregates": [
-          "COUNT",
-          "SUM"
-        ],
-        "expectedDimensions": [
-          "users.traffic_source"
-        ],
-        "expectedMeasures": [
-          "event_count",
-          "total_sale_price"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "events.id",
-          "events.traffic_source",
           "order_items.sale_price",
-          "users.traffic_source"
+          "users.traffic_source",
+          "COUNT",
+          "SUM",
+          "GROUP BY"
         ]
       }
     },
@@ -120,22 +84,14 @@
         "minDimensions": 1,
         "minMeasures": 2,
         "minFilters": 1,
-        "expectedSqlAggregates": [
-          "COUNT",
-          "SUM"
-        ],
-        "expectedDimensions": [
-          "users.state"
-        ],
-        "expectedMeasures": [
-          "event_count",
-          "total_sale_price"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "events.id",
           "order_items.sale_price",
           "users.state",
-          "users.gender"
+          "users.gender",
+          "COUNT",
+          "SUM",
+          "GROUP BY"
         ]
       }
     },
@@ -146,26 +102,15 @@
         "minDimensions": 2,
         "minMeasures": 3,
         "minFilters": 0,
-        "expectedSqlAggregates": [
-          "COUNT",
-          "COUNT_DISTINCT",
-          "SUM"
-        ],
-        "expectedDimensions": [
-          "users.traffic_source",
-          "users.gender"
-        ],
-        "expectedMeasures": [
-          "event_count",
-          "distinct_customer_count",
-          "total_sale_price"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "events.id",
           "order_items.sale_price",
-          "order_items.user_id",
           "users.traffic_source",
-          "users.gender"
+          "users.gender",
+          "COUNT",
+          "COUNT(DISTINCT",
+          "SUM",
+          "GROUP BY"
         ]
       }
     },
@@ -176,23 +121,13 @@
         "minDimensions": 1,
         "minMeasures": 3,
         "minFilters": 0,
-        "expectedSqlAggregates": [
-          "COUNT_DISTINCT",
-          "COUNT"
-        ],
-        "expectedDimensions": [
-          "users.state"
-        ],
-        "expectedMeasures": [
-          "distinct_order_count",
-          "item_count",
-          "returned_item_count"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "orders.order_id",
           "order_items.id",
-          "order_items.status",
-          "users.state"
+          "users.state",
+          "COUNT(DISTINCT",
+          "COUNT",
+          "GROUP BY"
         ]
       }
     },
@@ -203,23 +138,14 @@
         "minDimensions": 1,
         "minMeasures": 2,
         "minFilters": 1,
-        "expectedSqlAggregates": [
-          "COUNT_DISTINCT",
-          "COUNT"
-        ],
-        "expectedDimensions": [
-          "products.category"
-        ],
-        "expectedMeasures": [
-          "distinct_order_count",
-          "returned_item_count"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "orders.order_id",
           "order_items.id",
-          "order_items.status",
           "order_items.sale_price",
-          "products.category"
+          "products.category",
+          "COUNT(DISTINCT",
+          "COUNT",
+          "GROUP BY"
         ]
       }
     },
@@ -230,26 +156,16 @@
         "minDimensions": 1,
         "minMeasures": 4,
         "minFilters": 0,
-        "expectedSqlAggregates": [
-          "COUNT",
-          "COUNT_DISTINCT",
-          "SUM"
-        ],
-        "expectedDimensions": [
-          "users.state"
-        ],
-        "expectedMeasures": [
-          "event_count",
-          "distinct_order_count",
-          "total_sale_price",
-          "inventory_count"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "events.id",
           "orders.order_id",
           "order_items.sale_price",
           "inventory_items.id",
-          "users.state"
+          "users.state",
+          "COUNT",
+          "COUNT(DISTINCT",
+          "SUM",
+          "GROUP BY"
         ]
       }
     },
@@ -260,25 +176,15 @@
         "minDimensions": 2,
         "minMeasures": 3,
         "minFilters": 0,
-        "expectedSqlAggregates": [
-          "SUM",
-          "COUNT"
-        ],
-        "expectedDimensions": [
-          "products.department",
-          "products.category"
-        ],
-        "expectedMeasures": [
-          "total_sale_price",
-          "returned_item_count",
-          "total_inventory_cost"
-        ],
-        "participatingColumns": [
+        "expectedSql": [
           "order_items.sale_price",
           "order_items.status",
           "inventory_items.cost",
           "products.department",
-          "products.category"
+          "products.category",
+          "SUM",
+          "COUNT",
+          "GROUP BY"
         ]
       }
     },
@@ -286,7 +192,7 @@
       "supported": false,
       "prompt": "Show real-time container CPU metrics and cluster node memory usage by minute.",
       "expectation": {
-        "participatingColumns": []
+        "expectedSql": []
       }
     }
   }

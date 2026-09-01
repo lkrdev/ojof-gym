@@ -760,16 +760,38 @@ def generate_html_report_with_artifacts(
     lines.append(f'        <td><strong>{q_with_pass}/{total_q} Passed</strong><br>{q_badge}</td>')
     lines.append('      </tr>')
 
-    # Section: Model Maintainability (Turn 2 Extension)
-    lines.append('      <tr class="section-row"><td colspan="3">Model Maintainability (Turn 2 Extension)</td></tr>')
+    # Section: Model Maintainability (Incremental Query Extension)
+    pct_served_w = m_with.get('pct_queries_served_without_changes', 0.0)
+    pct_served_n = m_no.get('pct_queries_served_without_changes', 0.0)
+    zero_touch_w = m_with.get('queries_served_without_changes', 0)
+    zero_touch_n = m_no.get('queries_served_without_changes', 0)
+    tot_supp_w = m_with.get('total_supported_queries', total_q)
+    tot_supp_n = m_no.get('total_supported_queries', total_q)
+
+    avg_lines_w = m_with.get('avg_lines_modified_per_query', 0.0)
+    avg_lines_n = m_no.get('avg_lines_modified_per_query', 0.0)
+
+    lines.append('      <tr class="section-row"><td colspan="3">Model Maintainability (Incremental Query Extension)</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Lines Changed (Churn)</strong></a></td>')
+    lines.append('        <td><a href="#4-model-maintainability"><strong>Queries Served Without LookML Changes</strong></a></td>')
+    lines.append(f'        <td>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</td>')
+    served_delta = format_pct_delta(pct_served_w, pct_served_n, reverse_is_better=False)
+    lines.append(f'        <td><strong>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})</strong><br>{served_delta}</td>')
+    lines.append('      </tr>')
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#4-model-maintainability"><strong>Avg. Lines Modified per Query Turn</strong></a></td>')
+    lines.append(f'        <td>{avg_lines_n:.1f} lines/query</td>')
+    avg_lines_delta = format_pct_delta(avg_lines_w, avg_lines_n, reverse_is_better=True)
+    lines.append(f'        <td><strong>{avg_lines_w:.1f} lines/query</strong><br>{avg_lines_delta}</td>')
+    lines.append('      </tr>')
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#4-model-maintainability"><strong>Cumulative Lines Changed (Churn)</strong></a></td>')
     lines.append(f'        <td>{lines_n} lines (+{added_n} / -{del_n})</td>')
     churn_badge = format_pct_delta(lines_w, lines_n, reverse_is_better=True)
     lines.append(f'        <td><strong>{lines_w} lines (+{added_w} / -{del_w})</strong><br>{churn_badge}</td>')
     lines.append('      </tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Tokens Consumed (Turns 1 + 2)</strong></a></td>')
+    lines.append('        <td><a href="#4-model-maintainability"><strong>Tokens Consumed (Turns 1 to N)</strong></a></td>')
     lines.append(f'        <td>{tot_tok_no:,} tokens</td>')
     tok_badge = format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)
     lines.append(f'        <td><strong>{tot_tok_with:,} tokens</strong><br>{tok_badge}</td>')
@@ -1086,6 +1108,24 @@ def generate_html_report_with_artifacts(
         if exp_badges:
             lines.append(f'  <div style="font-size: 12px; margin-bottom: 8px; color: #3c4043; background: #f8f9fa; padding: 6px 10px; border-radius: 4px; border: 1px solid #e8eaed;">{" &nbsp;|&nbsp; ".join(exp_badges)}</div>')
 
+        # Per-query maintenance turn data
+        w_qturn = with_skill.get("query_turns", {}).get(qk, {})
+        n_qturn = no_skill.get("query_turns", {}).get(qk, {})
+
+        w_q_lines = w_qturn.get("total_lines_changed", 0)
+        n_q_lines = n_qturn.get("total_lines_changed", 0)
+        w_q_served = w_qturn.get("served_without_changes", (w_q_lines == 0))
+        n_q_served = n_qturn.get("served_without_changes", (n_q_lines == 0))
+
+        w_maint_badge = '<span class="delta delta-good" style="font-weight: 600;">Zero-Touch (0 lines modified)</span>' if w_q_served else f'<span class="delta delta-neutral">Modified +{w_qturn.get("lines_added", 0)} / -{w_qturn.get("lines_deleted", 0)} lines</span>'
+        n_maint_badge = '<span class="delta delta-good" style="font-weight: 600;">Zero-Touch (0 lines modified)</span>' if n_q_served else f'<span class="delta delta-bad">Modified +{n_qturn.get("lines_added", 0)} / -{n_qturn.get("lines_deleted", 0)} lines</span>'
+
+        w_turn_diff = w_qturn.get("diff_text", "").strip()
+        n_turn_diff = n_qturn.get("diff_text", "").strip()
+
+        w_diff_html = f'<pre class="diff-block"><code>{html.escape(w_turn_diff)}</code></pre>' if w_turn_diff else '<p style="color: #5f6368; font-style: italic; margin: 4px 0;">No LookML changes required (model served query as-is).</p>'
+        n_diff_html = f'<pre class="diff-block"><code>{html.escape(n_turn_diff)}</code></pre>' if n_turn_diff else '<p style="color: #5f6368; font-style: italic; margin: 4px 0;">No LookML changes required.</p>'
+
         lines.append('  <table class="side-by-side-table">')
         lines.append('    <thead>')
         lines.append('      <tr>')
@@ -1094,6 +1134,15 @@ def generate_html_report_with_artifacts(
         lines.append('      </tr>')
         lines.append('    </thead>')
         lines.append('    <tbody>')
+        lines.append('      <tr>')
+        lines.append(f'        <td><b>LookML Maintenance:</b> {n_maint_badge}</td>')
+        lines.append(f'        <td><b>LookML Maintenance:</b> {w_maint_badge}</td>')
+        lines.append('      </tr>')
+        if w_turn_diff or n_turn_diff:
+            lines.append('      <tr>')
+            lines.append(f'        <td><b>Turn LookML Diff:</b>{n_diff_html}</td>')
+            lines.append(f'        <td><b>Turn LookML Diff:</b>{w_diff_html}</td>')
+            lines.append('      </tr>')
         lines.append('      <tr>')
         lines.append(f'        <td><b>Explore Used:</b> <code>{html.escape(str(n_explore))}</code><br><b>Participating Fields:</b> {n_fields_str}<br><b>Expected Columns:</b> {exp_cols_str}</td>')
         lines.append(f'        <td><b>Explore Used:</b> <code>{html.escape(str(w_explore))}</code><br><b>Participating Fields:</b> {w_fields_str}<br><b>Expected Columns:</b> {exp_cols_str}</td>')

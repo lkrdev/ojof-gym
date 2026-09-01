@@ -86,25 +86,10 @@
                 "type": "integer",
                 "description": "Minimum count of filters expected in the query."
               },
-              "expectedSqlAggregates": {
+              "expectedSql": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "SQL aggregate functions expected in the compiled SQL (e.g. SUM, COUNT, COUNT_DISTINCT, AVG)."
-              },
-              "expectedDimensions": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Expected dimensions or groupings in the query."
-              },
-              "expectedMeasures": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Expected aggregate measure concepts in the query."
-              },
-              "participatingColumns": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "List of physical database columns (table.column) expected in the compiled SQL."
+                "description": "List of SQL tokens, column references, or aggregate functions expected in the compiled SQL (e.g. ['order_items.sale_price', 'inventory_items.cost', 'SUM', 'GROUP BY'])."
               }
             }
           }

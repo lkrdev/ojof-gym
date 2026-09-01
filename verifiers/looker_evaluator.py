@@ -62,9 +62,6 @@ class LookerEvaluator:
         login_res = run_looker_cli(["session", "login"])
         return login_res.returncode == 0
 
-    def is_available(self) -> bool:
-        return self.ensure_authenticated()
-
     def list_remote_files(self) -> List[str]:
         """Lists all files in Looker project."""
         self.ensure_authenticated()
@@ -264,20 +261,17 @@ class LookerEvaluator:
 
             prompt = qval.get("prompt", "")
             expectation = qval.get("expectation", {})
-            exp_cols = expectation.get("participatingColumns", [])
-            exp_aggs = expectation.get("expectedSqlAggregates", [])
+            exp_sql_elements = expectation.get("expectedSql") or expectation.get("participatingColumns", [])
             min_dims = expectation.get("minDimensions", 0)
             min_measures = expectation.get("minMeasures", 0)
 
-            # Map column names if join was aliased (e.g. products.category -> product.category)
+            # Query fields fallback: use fields explicitly discovered or target explore count
             mapped_fields = []
-            for col in exp_cols:
-                if "." in col:
-                    v_name, f_name = col.split(".", 1)
+            for item in exp_sql_elements:
+                if "." in item and not any(item.upper().startswith(kw) for kw in ["SUM", "COUNT", "AVG", "GROUP"]):
+                    v_name, f_name = item.split(".", 1)
                     alias = joins_map.get(v_name, v_name)
                     mapped_fields.append(f"{alias}.{f_name}")
-                else:
-                    mapped_fields.append(col)
 
             query_payload = {
                 "model": target_model,
@@ -288,35 +282,29 @@ class LookerEvaluator:
             compile_res = self.compile_query_to_sql(query_payload)
             sql = compile_res.get("sql", "")
 
-            # If compilation failed with mapped fields, try raw expected fields
-            if compile_res.get("status") != "success" and mapped_fields != exp_cols:
-                query_payload["fields"] = exp_cols
-                compile_res = self.compile_query_to_sql(query_payload)
-                sql = compile_res.get("sql", "")
-
-            missing_cols = []
-            missing_aggs = []
+            missing_elements = []
             has_group_by = False
+            has_aggregate = False
 
             if sql:
-                for exp_col in exp_cols:
-                    col_name = exp_col.split(".")[-1] if "." in exp_col else exp_col
-                    if not re.search(rf"\b{re.escape(col_name)}\b", sql, re.IGNORECASE):
-                        missing_cols.append(exp_col)
-
-                # Validate expected SQL aggregate functions
-                for agg in exp_aggs:
-                    if agg.upper() in ["COUNT_DISTINCT", "COUNT(DISTINCT)"]:
+                for elem in exp_sql_elements:
+                    if elem.upper() in ["COUNT_DISTINCT", "COUNT(DISTINCT)"]:
                         if not re.search(r"COUNT\s*\(\s*DISTINCT\b", sql, re.IGNORECASE):
-                            missing_aggs.append("COUNT(DISTINCT)")
-                    elif not re.search(rf"\b{re.escape(agg)}\s*\(", sql, re.IGNORECASE):
-                        missing_aggs.append(agg)
+                            missing_elements.append("COUNT(DISTINCT)")
+                    elif elem.upper() in ["SUM", "COUNT", "AVG", "MIN", "MAX", "GROUP BY", "WHERE", "HAVING"]:
+                        if not re.search(rf"\b{re.escape(elem)}\b", sql, re.IGNORECASE):
+                            missing_elements.append(elem)
+                    else:
+                        col_name = elem.split(".")[-1] if "." in elem else elem
+                        if not re.search(rf"\b{re.escape(col_name)}\b", sql, re.IGNORECASE):
+                            missing_elements.append(elem)
 
                 has_group_by = bool(re.search(r"\bGROUP\s+BY\b", sql, re.IGNORECASE))
+                has_aggregate = bool(re.search(r"\b(SUM|COUNT|AVG|MIN|MAX)\s*\(", sql, re.IGNORECASE))
 
-            agg_passed = (len(missing_aggs) == 0)
-            group_by_passed = True if min_dims == 0 else has_group_by
-            compile_passed = (compile_res.get("status") == "success") and (len(missing_cols) == 0)
+            dims_passed = True if min_dims == 0 else has_group_by
+            meas_passed = True if min_measures == 0 else has_aggregate
+            compile_passed = (compile_res.get("status") == "success") and (len(missing_elements) == 0) and dims_passed and meas_passed
 
             exec_res = {}
             if compile_passed:
@@ -325,11 +313,10 @@ class LookerEvaluator:
             results[qkey] = {
                 "supported": True,
                 "prompt": prompt,
-                "expected_columns": exp_cols,
-                "missing_columns": missing_cols,
-                "expected_aggregates": exp_aggs,
-                "missing_aggregates": missing_aggs,
+                "expected_sql": exp_sql_elements,
+                "missing_sql_elements": missing_elements,
                 "has_group_by": has_group_by,
+                "has_aggregate": has_aggregate,
                 "min_dimensions": min_dims,
                 "min_measures": min_measures,
                 "compiled_sql": sql,

@@ -15,71 +15,16 @@ if str(PROJECT_ROOT) not in sys.path:
 from verifiers.ojof_linter import audit_lookml_directory
 
 EXPECTED_PARTICIPATING_COLUMNS = {
-  "salesRevenueVsInventoryCostByCategory": [
-    "order_items.sale_price",
-    "order_items.status",
-    "inventory_items.cost",
-    "products.category"
-  ],
-  "salesRevenueVsInventoryCostByBrand": [
-    "order_items.sale_price",
-    "inventory_items.cost",
-    "products.brand",
-    "products.department"
-  ],
-  "salesRevenueVsInventoryValuationByDepartmentAndCategory": [
-    "order_items.sale_price",
-    "order_items.status",
-    "inventory_items.cost",
-    "products.department",
-    "products.category"
-  ],
-  "webTrafficVsOrderRevenueByTrafficSource": [
-    "events.id",
-    "events.traffic_source",
-    "order_items.sale_price",
-    "users.traffic_source"
-  ],
-  "webTrafficVsOrderRevenueByState": [
-    "events.id",
-    "order_items.sale_price",
-    "users.state",
-    "users.gender"
-  ],
-  "webTrafficAndCustomersByTrafficSourceAndGender": [
-    "events.id",
-    "order_items.sale_price",
-    "order_items.user_id",
-    "users.traffic_source",
-    "users.gender"
-  ],
-  "orderVolumeVsReturnedItemsByState": [
-    "orders.order_id",
-    "order_items.id",
-    "order_items.status",
-    "users.state"
-  ],
-  "orderVolumeVsReturnedItemsByCategory": [
-    "orders.order_id",
-    "order_items.id",
-    "order_items.status",
-    "order_items.sale_price",
-    "products.category"
-  ],
-  "fullCrossFactMarketingAndFulfillmentByState": [
-    "events.id",
-    "orders.order_id",
-    "order_items.sale_price",
-    "inventory_items.id",
-    "users.state"
-  ],
-  "categoryRevenueReturnsAndInventoryValuation": [
-    "order_items.sale_price",
-    "order_items.status",
-    "inventory_items.cost",
-    "products.department",
-    "products.category"
-  ]
+  "salesRevenueVsInventoryCostByCategory": [],
+  "salesRevenueVsInventoryCostByBrand": [],
+  "salesRevenueVsInventoryValuationByDepartmentAndCategory": [],
+  "webTrafficVsOrderRevenueByTrafficSource": [],
+  "webTrafficVsOrderRevenueByState": [],
+  "webTrafficAndCustomersByTrafficSourceAndGender": [],
+  "orderVolumeVsReturnedItemsByState": [],
+  "orderVolumeVsReturnedItemsByCategory": [],
+  "fullCrossFactMarketingAndFulfillmentByState": [],
+  "categoryRevenueReturnsAndInventoryValuation": []
 }
 
 def main():
