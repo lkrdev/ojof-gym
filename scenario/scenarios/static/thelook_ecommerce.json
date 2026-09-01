@@ -1,0 +1,293 @@
+{
+  "$schema": "../../schema.json",
+  "status": "active",
+  "title": "TheLook E-Commerce Unified Retail Analytics",
+  "description": "Unified analytics explore combining order transactions, line-item fulfillment, warehouse inventory, and web event traffic across shared customer, product, and geographic dimensions.",
+  "bigquery": {
+    "dataset": "bigquery-public-data.thelook_ecommerce",
+    "location": "US",
+    "reuse_existing": true
+  },
+  "architecturePrompt": "You are tasked with building a unified LookML exploration model for our e-commerce business using the public dataset in BigQuery (dataset: `bigquery-public-data.thelook_ecommerce`).\n\nOur business teams (Merchandising, Marketing, and Operations) need a single, intuitive Explore to answer combined business questions without navigating multiple fragmented models. Key reporting scenarios include:\n- Comparing sales revenue and product profit margins against warehouse inventory valuation and available stock, sliced by product brand or category.\n- Evaluating digital marketing impact by looking at web browsing event activity alongside actual order conversion value and customer volume by acquisition channel and customer geography.\n- Monitoring order fulfillment health by tracking total orders placed against item-level returns and cancellations across user locations over time.\n\nPlease inspect the tables in `bigquery-public-data.thelook_ecommerce`. Design your LookML explore so that business users can seamlessly combine metrics across order items, warehouse inventory, web events, and order headers alongside shared dimensions (products, users, distribution centers, and common calendar dates) in single queries without duplicate metric aggregations, inflated row counts, or query performance issues.",
+  "userQuestions": {
+    "salesRevenueVsInventoryCostByCategory": {
+      "supported": true,
+      "prompt": "Compare total completed sales revenue against total warehouse inventory cost on hand, grouped by product category.",
+      "expectation": {
+        "minDimensions": 1,
+        "minMeasures": 2,
+        "minFilters": 1,
+        "expectedSqlAggregates": [
+          "SUM"
+        ],
+        "expectedDimensions": [
+          "products.category"
+        ],
+        "expectedMeasures": [
+          "total_sale_price",
+          "total_cost"
+        ],
+        "participatingColumns": [
+          "order_items.sale_price",
+          "order_items.status",
+          "inventory_items.cost",
+          "products.category"
+        ]
+      }
+    },
+    "salesRevenueVsInventoryCostByBrand": {
+      "supported": true,
+      "prompt": "Compare total sales revenue against total inventory cost on hand, grouped by product brand for items in the Men department.",
+      "expectation": {
+        "minDimensions": 1,
+        "minMeasures": 2,
+        "minFilters": 1,
+        "expectedSqlAggregates": [
+          "SUM"
+        ],
+        "expectedDimensions": [
+          "products.brand"
+        ],
+        "expectedMeasures": [
+          "total_sale_price",
+          "total_cost"
+        ],
+        "participatingColumns": [
+          "order_items.sale_price",
+          "inventory_items.cost",
+          "products.brand",
+          "products.department"
+        ]
+      }
+    },
+    "salesRevenueVsInventoryValuationByDepartmentAndCategory": {
+      "supported": true,
+      "prompt": "Compare total sales revenue and total inventory cost across product department and category for completed transactions.",
+      "expectation": {
+        "minDimensions": 2,
+        "minMeasures": 2,
+        "minFilters": 1,
+        "expectedSqlAggregates": [
+          "SUM"
+        ],
+        "expectedDimensions": [
+          "products.department",
+          "products.category"
+        ],
+        "expectedMeasures": [
+          "total_sale_price",
+          "total_cost"
+        ],
+        "participatingColumns": [
+          "order_items.sale_price",
+          "order_items.status",
+          "inventory_items.cost",
+          "products.department",
+          "products.category"
+        ]
+      }
+    },
+    "webTrafficVsOrderRevenueByTrafficSource": {
+      "supported": true,
+      "prompt": "Compare total web browsing events and distinct visitor sessions against total order sales revenue, grouped by user acquisition traffic source.",
+      "expectation": {
+        "minDimensions": 1,
+        "minMeasures": 2,
+        "minFilters": 0,
+        "expectedSqlAggregates": [
+          "COUNT",
+          "SUM"
+        ],
+        "expectedDimensions": [
+          "users.traffic_source"
+        ],
+        "expectedMeasures": [
+          "event_count",
+          "total_sale_price"
+        ],
+        "participatingColumns": [
+          "events.id",
+          "events.traffic_source",
+          "order_items.sale_price",
+          "users.traffic_source"
+        ]
+      }
+    },
+    "webTrafficVsOrderRevenueByState": {
+      "supported": true,
+      "prompt": "Compare total web event traffic against total order sales revenue, grouped by customer state for female customers.",
+      "expectation": {
+        "minDimensions": 1,
+        "minMeasures": 2,
+        "minFilters": 1,
+        "expectedSqlAggregates": [
+          "COUNT",
+          "SUM"
+        ],
+        "expectedDimensions": [
+          "users.state"
+        ],
+        "expectedMeasures": [
+          "event_count",
+          "total_sale_price"
+        ],
+        "participatingColumns": [
+          "events.id",
+          "order_items.sale_price",
+          "users.state",
+          "users.gender"
+        ]
+      }
+    },
+    "webTrafficAndCustomersByTrafficSourceAndGender": {
+      "supported": true,
+      "prompt": "Analyze total web event traffic, distinct purchasing customers count, and total sales revenue across user traffic source and customer gender.",
+      "expectation": {
+        "minDimensions": 2,
+        "minMeasures": 3,
+        "minFilters": 0,
+        "expectedSqlAggregates": [
+          "COUNT",
+          "COUNT_DISTINCT",
+          "SUM"
+        ],
+        "expectedDimensions": [
+          "users.traffic_source",
+          "users.gender"
+        ],
+        "expectedMeasures": [
+          "event_count",
+          "distinct_customer_count",
+          "total_sale_price"
+        ],
+        "participatingColumns": [
+          "events.id",
+          "order_items.sale_price",
+          "order_items.user_id",
+          "users.traffic_source",
+          "users.gender"
+        ]
+      }
+    },
+    "orderVolumeVsReturnedItemsByState": {
+      "supported": true,
+      "prompt": "Compare distinct order volume, total line items ordered, and returned item count, grouped by customer state.",
+      "expectation": {
+        "minDimensions": 1,
+        "minMeasures": 3,
+        "minFilters": 0,
+        "expectedSqlAggregates": [
+          "COUNT_DISTINCT",
+          "COUNT"
+        ],
+        "expectedDimensions": [
+          "users.state"
+        ],
+        "expectedMeasures": [
+          "distinct_order_count",
+          "item_count",
+          "returned_item_count"
+        ],
+        "participatingColumns": [
+          "orders.order_id",
+          "order_items.id",
+          "order_items.status",
+          "users.state"
+        ]
+      }
+    },
+    "orderVolumeVsReturnedItemsByCategory": {
+      "supported": true,
+      "prompt": "Compare distinct orders placed against returned items count, grouped by product category for items with non-zero sale price.",
+      "expectation": {
+        "minDimensions": 1,
+        "minMeasures": 2,
+        "minFilters": 1,
+        "expectedSqlAggregates": [
+          "COUNT_DISTINCT",
+          "COUNT"
+        ],
+        "expectedDimensions": [
+          "products.category"
+        ],
+        "expectedMeasures": [
+          "distinct_order_count",
+          "returned_item_count"
+        ],
+        "participatingColumns": [
+          "orders.order_id",
+          "order_items.id",
+          "order_items.status",
+          "order_items.sale_price",
+          "products.category"
+        ]
+      }
+    },
+    "fullCrossFactMarketingAndFulfillmentByState": {
+      "supported": true,
+      "prompt": "Provide a comprehensive cross-department summary comparing web browsing events, distinct placed orders, total sales revenue, and warehouse inventory items, grouped by customer state.",
+      "expectation": {
+        "minDimensions": 1,
+        "minMeasures": 4,
+        "minFilters": 0,
+        "expectedSqlAggregates": [
+          "COUNT",
+          "COUNT_DISTINCT",
+          "SUM"
+        ],
+        "expectedDimensions": [
+          "users.state"
+        ],
+        "expectedMeasures": [
+          "event_count",
+          "distinct_order_count",
+          "total_sale_price",
+          "inventory_count"
+        ],
+        "participatingColumns": [
+          "events.id",
+          "orders.order_id",
+          "order_items.sale_price",
+          "inventory_items.id",
+          "users.state"
+        ]
+      }
+    },
+    "categoryRevenueReturnsAndInventoryValuation": {
+      "supported": true,
+      "prompt": "Evaluate merchandising health by reporting total sales revenue, total returned items count, and total warehouse inventory valuation, grouped by product department and category.",
+      "expectation": {
+        "minDimensions": 2,
+        "minMeasures": 3,
+        "minFilters": 0,
+        "expectedSqlAggregates": [
+          "SUM",
+          "COUNT"
+        ],
+        "expectedDimensions": [
+          "products.department",
+          "products.category"
+        ],
+        "expectedMeasures": [
+          "total_sale_price",
+          "returned_item_count",
+          "total_inventory_cost"
+        ],
+        "participatingColumns": [
+          "order_items.sale_price",
+          "order_items.status",
+          "inventory_items.cost",
+          "products.department",
+          "products.category"
+        ]
+      }
+    },
+    "unsupportedRealtimeServerLogs": {
+      "supported": false,
+      "prompt": "Show real-time container CPU metrics and cluster node memory usage by minute.",
+      "expectation": {
+        "participatingColumns": []
+      }
+    }
+  }
+}

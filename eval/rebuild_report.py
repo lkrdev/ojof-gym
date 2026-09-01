@@ -33,12 +33,23 @@ def rebuild_run_report(
     re_verify_looker: bool = True
 ):
     print(f"[Report Rebuilder] Rebuilding report from saved artifacts in: {run_dir}")
-    eval_json_path = run_dir / "eval_results.json"
-    if not eval_json_path.exists():
-        raise FileNotFoundError(f"Missing eval_results.json in {run_dir}")
+    master_results = {"tasks": []}
+    if eval_json_path.exists() and eval_json_path.stat().st_size > 0:
+        try:
+            with open(eval_json_path) as f:
+                master_results = json.load(f)
+        except Exception as e:
+            print(f"  [Warning] Could not parse {eval_json_path}: {e}")
 
-    with open(eval_json_path) as f:
-        master_results = json.load(f)
+    if not master_results.get("tasks"):
+        # Auto-discover task folders
+        for td in sorted(run_dir.glob("task_*")):
+            if td.is_dir():
+                master_results["tasks"].append({
+                    "task_id": td.name,
+                    "with_skill": {},
+                    "no_skill": {}
+                })
 
     looker_eval = LookerEvaluator() if re_verify_looker else None
 

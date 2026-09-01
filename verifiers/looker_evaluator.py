@@ -263,8 +263,12 @@ class LookerEvaluator:
                 continue
 
             prompt = qval.get("prompt", "")
-            exp_cols = qval.get("expectation", {}).get("participatingColumns", [])
-            
+            expectation = qval.get("expectation", {})
+            exp_cols = expectation.get("participatingColumns", [])
+            exp_aggs = expectation.get("expectedSqlAggregates", [])
+            min_dims = expectation.get("minDimensions", 0)
+            min_measures = expectation.get("minMeasures", 0)
+
             # Map column names if join was aliased (e.g. products.category -> product.category)
             mapped_fields = []
             for col in exp_cols:
@@ -291,12 +295,27 @@ class LookerEvaluator:
                 sql = compile_res.get("sql", "")
 
             missing_cols = []
+            missing_aggs = []
+            has_group_by = False
+
             if sql:
                 for exp_col in exp_cols:
                     col_name = exp_col.split(".")[-1] if "." in exp_col else exp_col
                     if not re.search(rf"\b{re.escape(col_name)}\b", sql, re.IGNORECASE):
                         missing_cols.append(exp_col)
 
+                # Validate expected SQL aggregate functions
+                for agg in exp_aggs:
+                    if agg.upper() in ["COUNT_DISTINCT", "COUNT(DISTINCT)"]:
+                        if not re.search(r"COUNT\s*\(\s*DISTINCT\b", sql, re.IGNORECASE):
+                            missing_aggs.append("COUNT(DISTINCT)")
+                    elif not re.search(rf"\b{re.escape(agg)}\s*\(", sql, re.IGNORECASE):
+                        missing_aggs.append(agg)
+
+                has_group_by = bool(re.search(r"\bGROUP\s+BY\b", sql, re.IGNORECASE))
+
+            agg_passed = (len(missing_aggs) == 0)
+            group_by_passed = True if min_dims == 0 else has_group_by
             compile_passed = (compile_res.get("status") == "success") and (len(missing_cols) == 0)
 
             exec_res = {}
@@ -308,6 +327,11 @@ class LookerEvaluator:
                 "prompt": prompt,
                 "expected_columns": exp_cols,
                 "missing_columns": missing_cols,
+                "expected_aggregates": exp_aggs,
+                "missing_aggregates": missing_aggs,
+                "has_group_by": has_group_by,
+                "min_dimensions": min_dims,
+                "min_measures": min_measures,
                 "compiled_sql": sql,
                 "query_payload": query_payload,
                 "status": "passed" if (compile_passed and exec_res.get("status") == "success") else "failed",

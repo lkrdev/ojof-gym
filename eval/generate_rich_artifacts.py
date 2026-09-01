@@ -351,12 +351,18 @@ def process_run_artifacts(run_dir: Path):
 
 def render_sample_data_html_table(rows: List[Dict[str, Any]], max_rows: int = 10) -> str:
     if not rows or not isinstance(rows, list):
-        return "<p class='sample-null'>No sample rows returned or query not executed.</p>"
-    sample = rows[:max_rows]
-    if not sample or not isinstance(sample[0], dict):
-        return "<p class='sample-null'>No tabular data available.</p>"
+        return '<div class="sample-data-box"><p class="sample-empty">No sample records returned</p></div>'
     
-    cols = list(sample[0].keys())
+    sample = rows[:max_rows]
+    cols = list(sample[0].keys()) if sample else []
+    
+    # Calculate column grand totals for numeric fields across the full dataset
+    numeric_totals = {}
+    for c in cols:
+        num_vals = [r.get(c) for r in rows if isinstance(r.get(c), (int, float)) and not isinstance(r.get(c), bool)]
+        if num_vals and len(num_vals) >= len(rows) * 0.5:
+            numeric_totals[c] = sum(num_vals)
+
     out = ['<div class="sample-data-box">', '<table class="sample-table">']
     out.append('  <thead><tr>' + "".join(f'<th><code>{html.escape(str(c))}</code></th>' for c in cols) + '</tr></thead>')
     out.append('  <tbody>')
@@ -368,13 +374,31 @@ def render_sample_data_html_table(rows: List[Dict[str, Any]], max_rows: int = 10
                 cells.append('<td class="sample-null">null</td>')
             elif isinstance(val, float):
                 cells.append(f'<td>{val:.2f}</td>')
+            elif isinstance(val, int) and not isinstance(val, bool):
+                cells.append(f'<td>{val:,}</td>')
             else:
                 cells.append(f'<td>{html.escape(str(val))}</td>')
         out.append('    <tr>' + "".join(cells) + '</tr>')
     out.append('  </tbody>')
+
+    if numeric_totals:
+        out.append('  <tfoot>')
+        out.append('    <tr style="background: #f1f3f4; font-weight: 700; border-top: 2px solid #dadce0;">')
+        for i, c in enumerate(cols):
+            if c in numeric_totals:
+                tot = numeric_totals[c]
+                fmt_tot = f"{tot:,.2f}" if isinstance(tot, float) else f"{tot:,}"
+                out.append(f'<td><strong>{fmt_tot}</strong></td>')
+            elif i == 0:
+                out.append('<td><strong>Grand Total</strong></td>')
+            else:
+                out.append('<td style="color: #80868b;">—</td>')
+        out.append('    </tr>')
+        out.append('  </tfoot>')
+
     out.append('</table>')
     if len(rows) > max_rows:
-        out.append(f'<div style="font-size: 11px; color: #5f6368; padding: 4px 8px; font-style: italic; background: #fafafa; border-top: 1px solid #e8eaed;">Showing first {max_rows} of {len(rows)} sample rows</div>')
+        out.append(f'<div style="font-size: 11px; color: #5f6368; padding: 4px 8px; font-style: italic; background: #fafafa; border-top: 1px solid #e8eaed;">Showing first {max_rows} of {len(rows)} sample rows (Grand Total calculated across all {len(rows)} rows)</div>')
     out.append('</div>')
     return '\n'.join(out)
 
@@ -1051,6 +1075,17 @@ def generate_html_report_with_artifacts(
         lines.append(f'  <a id="{anchor}"></a>')
         lines.append(f'  <h3>Query: {html.escape(qv.get("prompt", qk))}</h3>')
 
+        exp_aggs = qv.get("expectation", {}).get("expectedSqlAggregates", [])
+        min_dims = qv.get("expectation", {}).get("minDimensions")
+        min_meas = qv.get("expectation", {}).get("minMeasures")
+        exp_badges = []
+        if exp_aggs:
+            exp_badges.append(f'<b>Expected SQL Aggregates:</b> <code>{", ".join(exp_aggs)}</code>')
+        if min_dims is not None and min_meas is not None:
+            exp_badges.append(f'<b>Expected Structure:</b> Min Dimensions: {min_dims}, Min Measures: {min_meas}')
+        if exp_badges:
+            lines.append(f'  <div style="font-size: 12px; margin-bottom: 8px; color: #3c4043; background: #f8f9fa; padding: 6px 10px; border-radius: 4px; border: 1px solid #e8eaed;">{" &nbsp;|&nbsp; ".join(exp_badges)}</div>')
+
         lines.append('  <table class="side-by-side-table">')
         lines.append('    <thead>')
         lines.append('      <tr>')
@@ -1073,6 +1108,48 @@ def generate_html_report_with_artifacts(
         lines.append('      </tr>')
         lines.append('    </tbody>')
         lines.append('  </table>')
+
+        # Metric Grand Totals & Discrepancy Comparison
+        def compute_numeric_totals(rows_data):
+            res = {}
+            if not rows_data or not isinstance(rows_data, list): return res
+            cols_found = rows_data[0].keys() if rows_data else []
+            for col_k in cols_found:
+                num_items = [r.get(col_k) for r in rows_data if isinstance(r.get(col_k), (int, float)) and not isinstance(r.get(col_k), bool)]
+                if num_items and len(num_items) >= len(rows_data) * 0.5:
+                    res[col_k] = sum(num_items)
+            return res
+
+        n_tots = compute_numeric_totals(n_rows)
+        w_tots = compute_numeric_totals(w_rows)
+        all_metric_keys = sorted(list(set(n_tots.keys()) | set(w_tots.keys())))
+
+        if all_metric_keys:
+            lines.append(f'  <p style="margin-top: 8px; margin-bottom: 4px; font-weight: 600;">Metric Grand Totals & Discrepancy for <code>{html.escape(qk)}</code>:</p>')
+            lines.append('  <table>')
+            lines.append('    <thead><tr><th style="width: 40%;">Metric Field</th><th style="width: 25%;">Baseline Grand Total</th><th style="width: 35%;">With-Skill Grand Total / Discrepancy</th></tr></thead>')
+            lines.append('    <tbody>')
+            for mk in all_metric_keys:
+                nv = n_tots.get(mk)
+                wv = w_tots.get(mk)
+                n_str = f"{nv:,.2f}" if isinstance(nv, float) else (f"{nv:,}" if isinstance(nv, int) else "N/A")
+                w_str = f"{wv:,.2f}" if isinstance(wv, float) else (f"{wv:,}" if isinstance(wv, int) else "N/A")
+
+                if nv is not None and wv is not None and (nv != 0 or wv != 0):
+                    if abs(nv - wv) < 0.001:
+                        badge = '<br><span class="delta delta-good">Matched (0.0% diff)</span>'
+                    elif nv > wv:
+                        pct_diff = ((nv - wv) / wv * 100.0) if wv != 0 else 100.0
+                        badge = f'<br><span class="delta delta-bad" style="color: #c5221f; font-weight: 700;">+{pct_diff:.1f}% Fanout Inflation in Baseline</span>'
+                    else:
+                        pct_diff = ((wv - nv) / nv * 100.0) if nv != 0 else 100.0
+                        badge = f'<br><span class="delta delta-bad" style="color: #c5221f; font-weight: 700;">Discrepancy: {pct_diff:.1f}%</span>'
+                else:
+                    badge = ""
+
+                lines.append(f'      <tr><td><code>{html.escape(str(mk))}</code></td><td>{n_str}</td><td><strong>{w_str}</strong>{badge}</td></tr>')
+            lines.append('    </tbody>')
+            lines.append('  </table>')
 
         # Inline Performance table
         lines.append(f'  <p style="margin-top: 8px; margin-bottom: 4px; font-weight: 600;">Performance for <code>{html.escape(qk)}</code>:</p>')
