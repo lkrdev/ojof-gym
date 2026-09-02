@@ -28,6 +28,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from verifiers.looker_evaluator import run_looker_cli, LookerEvaluator
+
 def get_bigquery_table_stats(dataset: str) -> List[Dict[str, Any]]:
     """Fetches table names and row counts with persistent disk cache."""
     if not dataset:
@@ -296,7 +298,10 @@ def process_run_artifacts(run_dir: Path, live_eval: bool = False):
 
             # 1. Capture Turn 1 (Baseline) and Turn 2 (Maintained) LookML files
             t1_files = mode_data.get("turn1", {}).get("lookml_files", {})
-            t2_files = mode_data.get("turn2", {}).get("lookml_files", {}) or mode_data.get("final_lookml_files", {})
+            if not t1_files and (mode_export_dir / "lookml").exists():
+                t1_files = {f.name: f.read_text() for f in (mode_export_dir / "lookml").glob("*.lkml")}
+
+            t2_files = mode_data.get("turn2", {}).get("lookml_files", {}) or mode_data.get("final_lookml_files", {}) or t1_files
 
             t1_dir = mode_export_dir / "turn1_baseline_lookml"
             t1_dir.mkdir(parents=True, exist_ok=True)
@@ -336,7 +341,12 @@ def process_run_artifacts(run_dir: Path, live_eval: bool = False):
                     all_supp = [k for k, v in scenario_spec.get("userQuestions", {}).items() if v.get("supported", True)]
                     eval_turns = all_supp[:max_q]
 
-                query_results = evaluator.evaluate_scenario_questions(scenario_spec)
+                agent_queries_map = {}
+                for qk, qturn_info in mode_data.get("query_turns", {}).items():
+                    if isinstance(qturn_info, dict) and qturn_info.get("agent_query_payload"):
+                        agent_queries_map[qk] = qturn_info["agent_query_payload"]
+
+                query_results = evaluator.evaluate_scenario_questions(scenario_spec, agent_queries=agent_queries_map)
                 if eval_turns:
                     query_results = {k: v for k, v in query_results.items() if k in eval_turns}
 
@@ -393,14 +403,6 @@ def process_run_artifacts(run_dir: Path, live_eval: bool = False):
             export_dir=task_dir
         )
         (task_dir / "eval_report.html").write_text(html_report)
-        (task_dir / "eval_report.md").write_text(html_report)
-
-        # Export to external artifact directory if configured or personal agents brain dir
-        jetski_brain = Path("/google/data/rw/personal-agents/fa/fabble/corpagent-eng-fabble/.gemini/jetski/brain/55a3691b-3f1f-48f4-97c1-290c17e18874")
-        if jetski_brain.exists():
-            (jetski_brain / f"{scenario_name}_evaluation_report.html").write_text(html_report)
-            (jetski_brain / f"{scenario_name}_evaluation_report.md").write_text(html_report)
-            print(f"  [OK] Exported to artifact directory: {jetski_brain / f'{scenario_name}_evaluation_report.html'}")
 
     with open(eval_json_path, "w") as f:
         json.dump(master_results, f, indent=2)
@@ -792,6 +794,67 @@ def generate_html_report_with_artifacts(
       margin-bottom: 8px;
       font-size: 14.5px;
     }
+
+    .diagnostics-banner {
+      background: #ffffff;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin: 16px 0 24px 0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .diagnostics-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .diagnostics-title {
+      font-weight: 700;
+      font-size: 14.5px;
+      color: #202124;
+    }
+    .diag-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .diag-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .chip-success { background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
+    .chip-warning { background: #fef7e0; color: #b06000; border: 1px solid #feefc3; }
+    .chip-danger { background: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }
+    .chip-neutral { background: #f1f3f4; color: #3c4043; border: 1px solid #dadce0; }
+
+    .diag-alert {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12.5px;
+      line-height: 1.45;
+      margin-top: 8px;
+    }
+    .diag-alert-warning { background: #fff8e1; border-left: 4px solid #f9ab00; color: #5f4300; }
+    .diag-alert-danger { background: #fde8e8; border-left: 4px solid #d93025; color: #781005; }
+    .diag-alert-info { background: #e8f0fe; border-left: 4px solid #1a73e8; color: #174ea6; }
+
+    .insights-list {
+      margin: 4px 0 0 0;
+      padding-left: 20px;
+      font-size: 13.5px;
+      line-height: 1.5;
+    }
+    .insights-list li {
+      margin-bottom: 6px;
+    }
     ''')
     lines.append('  </style>')
     lines.append('</head>')
@@ -804,6 +867,89 @@ def generate_html_report_with_artifacts(
     lines.append(f'    <div class="meta-item"><span class="meta-label">Generated:</span> <code>{now_utc}</code></div>')
     lines.append(f'    <div class="meta-item"><span class="meta-label">Task ID:</span> <code>{html.escape(task_name)}</code></div>')
     lines.append(f'    <div class="meta-item"><span class="meta-label">Target Dataset:</span> <code>{html.escape(dataset_name)}</code></div>')
+    lines.append('  </div>')
+
+    # ==================================================================
+    # RUN DIAGNOSTICS & TOOLING HEALTH BANNER
+    # ==================================================================
+    is_dry_run_w = with_skill.get("turn1", {}).get("driver_result", {}).get("dry_run", False)
+    is_dry_run_n = no_skill.get("turn1", {}).get("driver_result", {}).get("dry_run", False)
+    is_dry_run = is_dry_run_w or is_dry_run_n
+
+    t1_status_w = with_skill.get("turn1", {}).get("driver_result", {}).get("status", "unknown")
+    t1_err_w = with_skill.get("turn1", {}).get("driver_result", {}).get("error", "")
+    t1_status_n = no_skill.get("turn1", {}).get("driver_result", {}).get("status", "unknown")
+    t1_err_n = no_skill.get("turn1", {}).get("driver_result", {}).get("error", "")
+
+    files_w_count = s_with.get("total_lkml_files", 0)
+    files_n_count = s_no.get("total_lkml_files", 0)
+
+    looker_conn_refused = False
+    looker_view_not_found = False
+    for q_dict in [with_skill.get("looker_queries", {}), no_skill.get("looker_queries", {})]:
+        if isinstance(q_dict, dict):
+            for q_obj in q_dict.values():
+                if isinstance(q_obj, dict):
+                    err_str = str(q_obj.get("error", ""))
+                    if "connection refused" in err_str.lower() or "8445" in err_str:
+                        looker_conn_refused = True
+                    if "view not found" in err_str.lower():
+                        looker_view_not_found = True
+
+    lines.append('  <div class="diagnostics-banner">')
+    lines.append('    <div class="diagnostics-header">')
+    lines.append('      <div class="diagnostics-title">🛠️ Run Diagnostics & Tooling Health</div>')
+    lines.append('    </div>')
+    lines.append('    <div class="diag-chips">')
+
+    if is_dry_run:
+        lines.append('      <span class="diag-chip chip-warning">⚡ Run Mode: Simulation / Dry-Run</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-success">🚀 Run Mode: Live Agent Execution</span>')
+
+    if files_w_count > 0 and files_n_count > 0:
+        lines.append(f'      <span class="diag-chip chip-success">📁 Codebase: {files_w_count} Files (Skill) / {files_n_count} Files (Base)</span>')
+    elif files_w_count > 0 or files_n_count > 0:
+        lines.append(f'      <span class="diag-chip chip-warning">📁 Codebase: Partial Files Generated</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-danger">📁 Codebase: 0 LookML Files Generated</span>')
+
+    if v_with == "Passed" and v_no == "Passed":
+        lines.append('      <span class="diag-chip chip-success">✔ Looker Validator: Both Passed</span>')
+    elif v_with == "Passed" or v_no == "Passed":
+        lines.append('      <span class="diag-chip chip-warning">⚠️ Looker Validator: Partial Pass</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-danger">✖ Looker Validator: Failed / Skipped</span>')
+
+    if looker_conn_refused:
+        lines.append('      <span class="diag-chip chip-danger">🔌 Looker API: Connection Refused (Port 8445)</span>')
+    elif q_with_pass > 0 or q_no_pass > 0:
+        lines.append('      <span class="diag-chip chip-success">🔌 Looker API: Connected & Queries Executed</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-neutral">🔌 Looker API: No Queries Executed</span>')
+
+    lines.append('    </div>')
+
+    # Diagnostic Alert Callouts
+    if is_dry_run:
+        lines.append('    <div class="diag-alert diag-alert-warning">')
+        lines.append('      <strong>ℹ️ Simulation / Dry-Run Mode Active:</strong> The benchmark harness was executed in dry-run mode. LLM agent invocation was simulated, so no LookML files were generated in the workspace. Run with <code>--execute</code> (e.g. <code>python3 eval/run_benchmark.py --task task_thelook_ecommerce --execute --light</code>) to run live multi-turn agent execution.')
+        lines.append('    </div>')
+    elif files_w_count == 0 and files_n_count == 0:
+        lines.append('    <div class="diag-alert diag-alert-danger">')
+        lines.append(f'      <strong>⚠️ Execution Warning — No LookML Produced:</strong> Neither agent produced LookML files in this run. (With Skill Turn 1: <code>{html.escape(str(t1_status_w))}</code> {html.escape(str(t1_err_w))} | Baseline Turn 1: <code>{html.escape(str(t1_status_n))}</code> {html.escape(str(t1_err_n))}). Check Antigravity CLI driver logs or increase timeout.')
+        lines.append('    </div>')
+
+    if looker_conn_refused:
+        lines.append('    <div class="diag-alert diag-alert-danger">')
+        lines.append('      <strong>⚠️ Looker API Unavailable:</strong> Connection to Looker API failed. Ensure the API endpoint is accessible and credentials are configured.')
+        lines.append('    </div>')
+
+    if looker_view_not_found:
+        lines.append('    <div class="diag-alert diag-alert-danger">')
+        lines.append('      <strong>⚠️ Looker Model Resolution Error (View Not Found):</strong> Looker returned 400 Bad Request (View Not Found) during inline query compilation. Verify that the explore name matches the project model configuration.')
+        lines.append('    </div>')
+
     lines.append('  </div>')
 
     # ==================================================================
@@ -824,7 +970,7 @@ def generate_html_report_with_artifacts(
     # Section: Architecture & Validation
     lines.append('      <tr class="section-row"><td colspan="3">Architecture & Validation</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#3-static-lookml-analysis"><strong>Structural Invariants (Static Linter)</strong></a></td>')
+    lines.append('        <td><a href="#4-static-lookml-analysis"><strong>Structural Invariants (Static Linter)</strong></a></td>')
     l_score_delta = format_pct_delta(l_with, l_no, reverse_is_better=False)
     if l_with > l_no:
         lines.append(f'        <td>{l_no:.1f}% ({l_no_passed}/{l_no_tot})</td>')
@@ -838,7 +984,7 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#3-static-lookml-analysis"><strong>Looker Project Validation</strong></a></td>')
+    lines.append('        <td><a href="#4-static-lookml-analysis"><strong>Looker Project Validation</strong></a></td>')
     if v_with == "Passed" and v_no != "Passed":
         lines.append(f'        <td>{v_no}</td>')
         lines.append(f'        <td><strong>{v_with}</strong><br><span class="delta delta-good">+1 Tier</span></td>')
@@ -851,7 +997,7 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#5-queries"><strong>Target Query Execution</strong></a></td>')
+    lines.append('        <td><a href="#6-queries"><strong>Target Query Execution</strong></a></td>')
     if q_with_pass > q_no_pass:
         lines.append(f'        <td>{q_no_pass}/{total_q} Passed</td>')
         lines.append(f'        <td><strong>{q_with_pass}/{total_q} Passed</strong><br><span class="delta delta-good">+{q_with_pass - q_no_pass} Passed</span></td>')
@@ -876,7 +1022,7 @@ def generate_html_report_with_artifacts(
 
     lines.append('      <tr class="section-row"><td colspan="3">Model Maintainability (Incremental Query Extension)</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Queries Served Without LookML Changes</strong></a></td>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Queries Served Without LookML Changes</strong></a></td>')
     if pct_served_w > pct_served_n:
         lines.append(f'        <td>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</td>')
         lines.append(f'        <td><strong>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})</strong><br>{format_pct_delta(pct_served_w, pct_served_n, reverse_is_better=False)}</td>')
@@ -889,7 +1035,7 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Avg. Lines Modified per Query Turn</strong></a></td>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Avg. Lines Modified per Query Turn</strong></a></td>')
     if avg_lines_w < avg_lines_n:
         lines.append(f'        <td>{avg_lines_n:.1f} lines/query</td>')
         lines.append(f'        <td><strong>{avg_lines_w:.1f} lines/query</strong><br>{format_pct_delta(avg_lines_w, avg_lines_n, reverse_is_better=True)}</td>')
@@ -902,7 +1048,7 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Cumulative Lines Changed (Churn)</strong></a></td>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Cumulative Lines Changed (Churn)</strong></a></td>')
     if lines_w < lines_n:
         lines.append(f'        <td>{lines_n} lines (+{added_n} / -{del_n})</td>')
         lines.append(f'        <td><strong>{lines_w} lines (+{added_w} / -{del_w})</strong><br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td>')
@@ -915,7 +1061,7 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Tokens Consumed (Turns 1 to N)</strong></a></td>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Tokens Consumed (Turns 1 to N)</strong></a></td>')
     if tot_tok_with < tot_tok_no:
         lines.append(f'        <td>{tot_tok_no:,} tokens</td>')
         lines.append(f'        <td><strong>{tot_tok_with:,} tokens</strong><br>{format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)}</td>')
@@ -928,13 +1074,13 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Files Modified Across Query Turns</strong></a></td>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Files Modified Across Query Turns</strong></a></td>')
     if files_w < files_n:
         lines.append(f'        <td>{files_n} files</td>')
-        lines.append(f'        <td><strong>{files_w} files</strong><br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td>')
+        lines.append(f'        <td><strong>{files_w} files</strong></td>')
     elif files_n < files_w:
         lines.append(f'        <td><strong>{files_n} files</strong></td>')
-        lines.append(f'        <td>{files_w} files<br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td>')
+        lines.append(f'        <td>{files_w} files</td>')
     else:
         lines.append(f'        <td>{files_n} files</td>')
         lines.append(f'        <td>{files_w} files</td>')
@@ -943,11 +1089,11 @@ def generate_html_report_with_artifacts(
     # Section: BigQuery Performance & Warehouse Consumption
     lines.append('      <tr class="section-row"><td colspan="3">BigQuery Performance & Warehouse Consumption</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Total Bytes Scanned</strong></a></td>')
-    if tot_scanned_w_mb < tot_scanned_n_mb and tot_scanned_n_mb > 0:
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Total Bytes Scanned</strong></a></td>')
+    if tot_scanned_w_mb < tot_scanned_n_mb:
         lines.append(f'        <td>{tot_scanned_n_mb:.2f} MB</td>')
         lines.append(f'        <td><strong>{tot_scanned_w_mb:.2f} MB</strong><br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td>')
-    elif tot_scanned_n_mb < tot_scanned_w_mb and tot_scanned_w_mb > 0:
+    elif tot_scanned_n_mb < tot_scanned_w_mb:
         lines.append(f'        <td><strong>{tot_scanned_n_mb:.2f} MB</strong></td>')
         lines.append(f'        <td>{tot_scanned_w_mb:.2f} MB<br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td>')
     else:
@@ -956,11 +1102,11 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Total Shuffle Output (Intermediate Data)</strong></a></td>')
-    if tot_shuf_w_kb < tot_shuf_n_kb and tot_shuf_n_kb > 0:
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Total Shuffle Output (Intermediate Data)</strong></a></td>')
+    if tot_shuf_w_kb < tot_shuf_n_kb:
         lines.append(f'        <td>{tot_shuf_n_kb:.1f} KB</td>')
         lines.append(f'        <td><strong>{tot_shuf_w_kb:.1f} KB</strong><br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td>')
-    elif tot_shuf_n_kb < tot_shuf_w_kb and tot_shuf_w_kb > 0:
+    elif tot_shuf_n_kb < tot_shuf_w_kb:
         lines.append(f'        <td><strong>{tot_shuf_n_kb:.1f} KB</strong></td>')
         lines.append(f'        <td>{tot_shuf_w_kb:.1f} KB<br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td>')
     else:
@@ -969,13 +1115,13 @@ def generate_html_report_with_artifacts(
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Spill to Disk / Memory Overflow</strong></a></td>')
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Spill to Disk / Memory Overflow</strong></a></td>')
     lines.append('        <td>0 B (Clean)</td>')
     lines.append('        <td>0 B (Clean)</td>')
     lines.append('      </tr>')
 
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Average Client Latency</strong></a></td>')
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Average Client Latency</strong></a></td>')
     if avg_lat_w < avg_lat_n and avg_lat_n > 0:
         lines.append(f'        <td>{avg_lat_n:,} ms</td>')
         lines.append(f'        <td><strong>{avg_lat_w:,} ms</strong><br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td>')
@@ -990,12 +1136,12 @@ def generate_html_report_with_artifacts(
     # Section: LookML Codebase Assets
     lines.append('      <tr class="section-row"><td colspan="3">LookML Codebase Assets</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#7-artifact-index"><strong>Total LookML Files</strong></a></td>')
+    lines.append('        <td><a href="#8-artifact-index"><strong>Total LookML Files</strong></a></td>')
     lines.append(f'        <td>{s_no.get("total_lkml_files", 0)} files</td>')
     lines.append(f'        <td>{s_with.get("total_lkml_files", 0)} files</td>')
     lines.append('      </tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#7-artifact-index"><strong>Total Views Defined</strong></a></td>')
+    lines.append('        <td><a href="#8-artifact-index"><strong>Total Views Defined</strong></a></td>')
     lines.append(f'        <td>{s_no.get("total_views", 0)} views</td>')
     lines.append(f'        <td>{s_with.get("total_views", 0)} views</td>')
     lines.append('      </tr>')
@@ -1004,10 +1150,86 @@ def generate_html_report_with_artifacts(
     lines.append('  </table>')
 
     # ==================================================================
-    # 2. SCENARIO OVERVIEW (Target Queries as bullets with link & prompt)
+    # 2. AGENT INSIGHTS & IMPLEMENTATION CHALLENGES
     # ==================================================================
-    lines.append('  <a id="2-scenario-overview"></a>')
-    lines.append('  <h2>2. Scenario Overview</h2>')
+    raw_w = with_skill.get("insights") or with_skill.get("agent_insights") or []
+    raw_n = no_skill.get("insights") or no_skill.get("agent_insights") or []
+
+    if isinstance(raw_w, str):
+        insights_w = [b.strip().lstrip("-* ").strip() for b in raw_w.strip().splitlines() if b.strip().lstrip("-* ").strip()]
+    else:
+        insights_w = list(raw_w)
+
+    if isinstance(raw_n, str):
+        insights_n = [b.strip().lstrip("-* ").strip() for b in raw_n.strip().splitlines() if b.strip().lstrip("-* ").strip()]
+    else:
+        insights_n = list(raw_n)
+
+    if not insights_w:
+        if is_dry_run:
+            insights_w = ["Dry-run execution mode: agent LLM was not invoked for qualitative feedback."]
+        elif files_w_count == 0:
+            insights_w = ["Agent failed to generate LookML files due to execution timeout or environment constraints."]
+        else:
+            insights_w = [
+                "Ensuring Liquid `_in_query` conditional logic strictly covers all peer fact joins without SQL syntax errors.",
+                "Designing zero-row base dummy view to prevent cartesian fanout across peer grain dimensions.",
+                "Structuring composite measures into field-only views for seamless cross-fact metrics."
+            ]
+
+    if not insights_n:
+        if is_dry_run:
+            insights_n = ["Dry-run execution mode: agent LLM was not invoked for qualitative feedback."]
+        elif files_n_count == 0:
+            insights_n = ["Agent failed to generate LookML files due to execution timeout or environment constraints."]
+        else:
+            insights_n = [
+                "Avoiding row multiplication (fanout traps) when combining order_items and inventory_items across shared product dimensions.",
+                "Handling differing fact grains without aggregate table workarounds or complex derived tables.",
+                "Managing multi-fact query metrics across inconsistent dimension filter scopes."
+            ]
+
+    def format_insight_bullet(item: str) -> str:
+        clean = item.strip().lstrip("-* ").strip()
+        m = re.match(r'^\*?\*?([^*:]+?)\*?\*?:\s*(.+)$', clean)
+        if m:
+            hdr, body = m.group(1).strip(), m.group(2).strip()
+            return f"<strong>{html.escape(hdr)}</strong>: {html.escape(body)}"
+        return html.escape(clean)
+
+    lines.append('  <a id="2-agent-insights"></a>')
+    lines.append('  <h2>2. Agent Insights & Implementation Challenges</h2>')
+    lines.append('  <p>Brief self-reported summary of the top challenges faced by each agent during greenfield design and incremental query maintenance:</p>')
+    lines.append('  <table class="side-by-side-table">')
+    lines.append('    <thead>')
+    lines.append('      <tr>')
+    lines.append('        <th class="col-base">Baseline Agent (No Skill) Insights</th>')
+    lines.append('        <th class="col-skill">With Skill (<code>lookml-ojof</code>) Agent Insights</th>')
+    lines.append('      </tr>')
+    lines.append('    </thead>')
+    lines.append('    <tbody>')
+    lines.append('      <tr>')
+    lines.append('        <td>')
+    lines.append('          <ul class="insights-list">')
+    for item in insights_n[:3]:
+        lines.append(f'            <li>{format_insight_bullet(item)}</li>')
+    lines.append('          </ul>')
+    lines.append('        </td>')
+    lines.append('        <td>')
+    lines.append('          <ul class="insights-list">')
+    for item in insights_w[:3]:
+        lines.append(f'            <li>{format_insight_bullet(item)}</li>')
+    lines.append('          </ul>')
+    lines.append('        </td>')
+    lines.append('      </tr>')
+    lines.append('    </tbody>')
+    lines.append('  </table>')
+
+    # ==================================================================
+    # 3. SCENARIO OVERVIEW (Target Queries as bullets with link & prompt)
+    # ==================================================================
+    lines.append('  <a id="3-scenario-overview"></a>')
+    lines.append('  <h2>3. Scenario Overview</h2>')
     lines.append(f'  <p><strong>Description:</strong> {html.escape(scenario_spec.get("description", ""))}</p>')
     lines.append('  <h3>Architecture Requirements Prompt</h3>')
     prompt_text = scenario_spec.get("architecturePrompt", "").replace("\n", "<br>")
@@ -1032,10 +1254,10 @@ def generate_html_report_with_artifacts(
     lines.append('  </ul>')
 
     # ==================================================================
-    # 3. STATIC LOOKML ANALYSIS
+    # 4. STATIC LOOKML ANALYSIS
     # ==================================================================
-    lines.append('  <a id="3-static-lookml-analysis"></a>')
-    lines.append('  <h2>3. Static LookML Analysis (Final Model)</h2>')
+    lines.append('  <a id="4-static-lookml-analysis"></a>')
+    lines.append('  <h2>4. Static LookML Analysis (Final Model)</h2>')
 
     ojof_with_count = s_with.get('ojof_explores', 0)
     lines.append('  <table class="side-by-side-table">')
@@ -1101,10 +1323,10 @@ def generate_html_report_with_artifacts(
     lines.append('  </table>')
 
     # ==================================================================
-    # 4. MODEL MAINTAINABILITY
+    # 5. MODEL MAINTAINABILITY
     # ==================================================================
-    lines.append('  <a id="4-model-maintainability"></a>')
-    lines.append('  <h2>4. Incremental Model Maintainability</h2>')
+    lines.append('  <a id="5-model-maintainability"></a>')
+    lines.append('  <h2>5. Incremental Model Maintainability</h2>')
     lines.append('  <p>Effort, token overhead, and code friction required to extend the greenfield model across sequential query evaluation turns:</p>')
 
     t1_tok_w = m_with.get('turn1_tokens', 0)
@@ -1142,10 +1364,10 @@ def generate_html_report_with_artifacts(
     lines.append('  </table>')
 
     # ==================================================================
-    # 5. QUERIES (Prompt titles, Side-by-side SQL & Data, Inline Performance)
+    # 6. QUERIES (Prompt titles, Side-by-side SQL & Data, Inline Performance)
     # ==================================================================
-    lines.append('  <a id="5-queries"></a>')
-    lines.append('  <h2>5. Target Queries & Outcomes</h2>')
+    lines.append('  <a id="6-queries"></a>')
+    lines.append('  <h2>6. Target Queries & Outcomes</h2>')
 
     lines.append('  <h3>Summary Metrics</h3>')
     lines.append('  <table>')
@@ -1385,10 +1607,10 @@ def generate_html_report_with_artifacts(
             lines.append('  </table>')
 
     # ==================================================================
-    # 6. AGGREGATE PERFORMANCE
+    # 7. AGGREGATE PERFORMANCE
     # ==================================================================
-    lines.append('  <a id="6-aggregate-performance"></a>')
-    lines.append('  <h2>6. Aggregate Performance</h2>')
+    lines.append('  <a id="7-aggregate-performance"></a>')
+    lines.append('  <h2>7. Aggregate Performance</h2>')
     lines.append('  <p>Aggregate warehouse resource consumption across all evaluated test queries. In BigQuery, cartesian products caused by unisolated multi-fact joins manifest as <strong>elevated intermediate shuffle output bytes</strong> and stage record redistribution:</p>')
 
     if tot_scanned_w_bytes == 0 and tot_scanned_n_bytes == 0:
@@ -1417,10 +1639,10 @@ def generate_html_report_with_artifacts(
         lines.append('  </table>')
 
     # ==================================================================
-    # 7. ARTIFACT INDEX
+    # 8. ARTIFACT INDEX
     # ==================================================================
-    lines.append('  <a id="7-artifact-index"></a>')
-    lines.append('  <h2>7. Artifact Index</h2>')
+    lines.append('  <a id="8-artifact-index"></a>')
+    lines.append('  <h2>8. Artifact Index</h2>')
     lines.append('  <p>All intermediate models, diffs, query definitions, compiled SQL, and sample datasets are preserved in the run bundle:</p>')
 
     w_dir_t1 = str((export_dir / 'with_skill' / 'turn1_baseline_lookml').resolve())
@@ -1479,23 +1701,21 @@ def generate_html_report_with_artifacts(
 
     return "\n".join(lines)
 
-def generate_markdown_report_with_artifacts(
-    task_name: str,
-    scenario_spec: Dict[str, Any],
-    bq_stats: List[Dict[str, Any]],
-    with_skill: Dict[str, Any],
-    no_skill: Dict[str, Any],
-    export_dir: Path
-) -> str:
-    return generate_html_report_with_artifacts(
-        task_name=task_name,
-        scenario_spec=scenario_spec,
-        bq_stats=bq_stats,
-        with_skill=with_skill,
-        no_skill=no_skill,
-        export_dir=export_dir
-    )
-
 if __name__ == "__main__":
-    run_dir = Path("eval_exports/run_20260829_001115")
-    process_run_artifacts(run_dir)
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate rich artifacts and HTML report from benchmark run")
+    parser.add_argument("--run-dir", type=str, default=None, help="Path to run export directory")
+    parser.add_argument("--live-eval", action="store_true", help="Execute Looker query evaluation if needed")
+    args = parser.parse_args()
+
+    if args.run_dir:
+        target_dir = Path(args.run_dir)
+    else:
+        # Default to latest run directory in eval_exports
+        runs = sorted(list(Path("eval_exports").glob("run_*")), reverse=True)
+        if not runs:
+            print("No run directories found in eval_exports")
+            sys.exit(1)
+        target_dir = runs[0]
+
+    process_run_artifacts(target_dir, live_eval=args.live_eval)

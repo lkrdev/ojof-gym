@@ -30,21 +30,36 @@ def run_looker_cli(args: List[str]) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, env=env)
 
 class LookerEvaluator:
-    def __init__(self, project_id: str = "lookml_sandbox", connection_name: str = "default_bigquery_connection"):
-        self.project_id = os.environ.get("LOOKER_PROJECT", project_id)
+    def __init__(
+        self,
+        project_id: str = "lookml_sandbox",
+        connection_name: str = "default_bigquery_connection",
+        model_name: str = "sandbox"
+    ):
+        self.project_id = os.environ.get("LOOKER_PROJECT", os.environ.get("LOOKER_PROJECT_ID", project_id))
         self.connection_name = os.environ.get("LOOKER_CONNECTION", connection_name)
+        self.model_name = os.environ.get("LOOKER_MODEL", os.environ.get("LOOKER_MODEL_NAME", model_name))
 
     def is_available(self) -> bool:
         """Checks if looker-cli is available."""
         return WITH_LOOKER_BIN.exists() or (shutil.which("looker-cli") is not None)
 
     def ensure_authenticated(self) -> bool:
-        """Checks login and refreshes expired token if needed."""
+        """Checks login, refreshes expired token if needed, and ensures dev workspace mode."""
         if not self.is_available():
             return False
         res = run_looker_cli(["session", "get"])
         if res.returncode == 0:
-            return True
+            try:
+                data = json.loads(res.stdout)
+                if data.get("workspace_id") == "dev":
+                    return True
+                # In production workspace, switch to dev
+                up_res = run_looker_cli(["session", "update", "dev"])
+                if up_res.returncode == 0:
+                    return True
+            except Exception:
+                pass
 
         cfg_path = Path.home() / ".config" / "looker-cli" / "config.yaml"
         if cfg_path.exists():
@@ -60,7 +75,10 @@ class LookerEvaluator:
                 pass
 
         login_res = run_looker_cli(["session", "login"])
-        return login_res.returncode == 0
+        if login_res.returncode == 0:
+            dev_res = run_looker_cli(["session", "update", "dev"])
+            return dev_res.returncode == 0
+        return False
 
     def list_remote_files(self) -> List[str]:
         """Lists all files in Looker project."""
@@ -122,19 +140,27 @@ class LookerEvaluator:
                 tf.write(content)
                 tf_tmp = tf.name
 
-            try:
-                res = run_looker_cli(["project", "file", "update", self.project_id, rel_name, tf_tmp])
-                if res.returncode == 0:
-                    synced_files.append(rel_name)
-                else:
-                    res_create = run_looker_cli(["project", "file", "create", self.project_id, rel_name, tf_tmp])
-                    if res_create.returncode == 0:
-                        synced_files.append(rel_name)
+            # Target remote filename: alias model files to configured model name if needed
+            target_remote_names = [rel_name]
+            if rel_name.endswith(".model.lkml") and rel_name != f"{self.model_name}.model.lkml":
+                target_remote_names.append(f"{self.model_name}.model.lkml")
+
+            for r_name in target_remote_names:
+                try:
+                    res = run_looker_cli(["project", "file", "update", self.project_id, r_name, tf_tmp])
+                    if res.returncode == 0:
+                        synced_files.append(r_name)
                     else:
-                        errors.append(f"Failed to sync {rel_name}: {res.stderr or res.stdout}")
-            finally:
-                if os.path.exists(tf_tmp):
-                    os.remove(tf_tmp)
+                        res_create = run_looker_cli(["project", "file", "create", self.project_id, r_name, tf_tmp])
+                        if res_create.returncode == 0:
+                            synced_files.append(r_name)
+                        else:
+                            errors.append(f"Failed to sync {r_name}: {res.stderr or res.stdout}")
+                finally:
+                    pass
+
+            if os.path.exists(tf_tmp):
+                os.remove(tf_tmp)
 
         return {"synced": synced_files, "errors": errors}
 
@@ -235,7 +261,8 @@ class LookerEvaluator:
         self,
         scenario_spec: Dict[str, Any],
         model_name: Optional[str] = None,
-        explore_name: Optional[str] = None
+        explore_name: Optional[str] = None,
+        agent_queries: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
         """
         Tests each user question defined in the scenario spec against Looker.
@@ -243,12 +270,21 @@ class LookerEvaluator:
         user_questions = scenario_spec.get("userQuestions", {})
         results = {}
 
-        remote_files = self.list_remote_files()
-        model_file = next((f for f in remote_files if f.endswith(".model.lkml")), "thelook_ecommerce.model.lkml")
-        target_model = model_file.replace(".model.lkml", "") if not model_name else model_name
+        target_model = model_name or self.model_name
 
-        explore_file = next((f for f in remote_files if f.endswith(".explore.lkml")), None)
-        target_explore = explore_file.replace(".explore.lkml", "") if explore_file else (explore_name or "thelook_ecommerce")
+        remote_files = self.list_remote_files()
+        available_explores = []
+        for ef in [f for f in remote_files if f.endswith(".explore.lkml") or f.endswith(".model.lkml")]:
+            res = run_looker_cli(["project", "file", "cat", self.project_id, ef])
+            if res.returncode == 0:
+                available_explores.extend(re.findall(r"(?:^|\n)\s*explore:\s*(\w+)", res.stdout))
+
+        if explore_name and explore_name in available_explores:
+            default_explore = explore_name
+        elif available_explores:
+            default_explore = available_explores[0]
+        else:
+            default_explore = "sandbox"
 
         joins_map = self.get_explore_joins_map()
 
@@ -267,19 +303,26 @@ class LookerEvaluator:
             min_dims = expectation.get("minDimensions", 0)
             min_measures = expectation.get("minMeasures", 0)
 
-            # Query fields fallback: use fields explicitly discovered or target explore count
-            mapped_fields = []
-            for item in exp_sql_elements:
-                if "." in item and not any(item.upper().startswith(kw) for kw in ["SUM", "COUNT", "AVG", "GROUP"]):
-                    v_name, f_name = item.split(".", 1)
-                    alias = joins_map.get(v_name, v_name)
-                    mapped_fields.append(f"{alias}.{f_name}")
+            # Check if agent provided a query payload for this question
+            if agent_queries and qkey in agent_queries and isinstance(agent_queries[qkey], dict):
+                query_payload = dict(agent_queries[qkey])
+                query_payload["model"] = target_model
+                if not query_payload.get("view") or (available_explores and query_payload.get("view") not in available_explores):
+                    query_payload["view"] = default_explore
+            else:
+                # Fallback: query fields mapped from expected SQL elements
+                mapped_fields = []
+                for item in exp_sql_elements:
+                    if "." in item and not any(item.upper().startswith(kw) for kw in ["SUM", "COUNT", "AVG", "GROUP"]):
+                        v_name, f_name = item.split(".", 1)
+                        alias = joins_map.get(v_name, v_name)
+                        mapped_fields.append(f"{alias}.{f_name}")
 
-            query_payload = {
-                "model": target_model,
-                "view": target_explore,
-                "fields": mapped_fields if mapped_fields else [f"{target_explore}.count"]
-            }
+                query_payload = {
+                    "model": target_model,
+                    "view": default_explore,
+                    "fields": mapped_fields if mapped_fields else [f"{default_explore}.count"]
+                }
 
             compile_res = self.compile_query_to_sql(query_payload)
             sql = compile_res.get("sql", "")

@@ -12,6 +12,7 @@ import datetime
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -88,15 +89,40 @@ def get_bigquery_table_stats(dataset: str) -> List[Dict[str, Any]]:
 
     return tables
 
+def extract_query_payload_from_response(text: str) -> Optional[Dict[str, Any]]:
+    """Extracts JSON query payload from agent response text."""
+    if not text:
+        return None
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except Exception:
+            pass
+    m2 = re.search(r"(\{\s*\"model\"\s*:.*?\})", text, re.DOTALL)
+    if m2:
+        try:
+            return json.loads(m2.group(1))
+        except Exception:
+            pass
+    return None
+
 def build_turn1_prompt(scenario_spec: Dict[str, Any]) -> str:
     arch_prompt = scenario_spec.get("architecturePrompt", "Build a LookML data model.")
     bg_ds = scenario_spec.get("bigquery", {}).get("dataset", "")
+    looker_project = os.environ.get("LOOKER_PROJECT", os.environ.get("LOOKER_PROJECT_ID", "lookml_sandbox"))
+    looker_model = os.environ.get("LOOKER_MODEL", os.environ.get("LOOKER_MODEL_NAME", "sandbox"))
     return (
         f"You are tasked with designing and building a comprehensive LookML data model in your workspace.\n\n"
         f"### Business & Domain Requirements:\n{arch_prompt}\n\n"
+        f"### Target Looker Project & Model Configuration:\n"
+        f"- **Looker Project ID:** `{looker_project}`\n"
+        f"- **Configured Model Name:** `{looker_model}`\n"
+        f"- **Model File Requirement:** Your primary model file MUST be named `{looker_model}.model.lkml`.\n"
+        f"- **Query Payloads:** In all Looker query JSON payloads, set `\"model\": \"{looker_model}\"`.\n\n"
         f"### Underlying Dataset:\n- **BigQuery Dataset:** `{bg_ds}`\n\n"
         f"Please inspect the dataset, create all necessary `.view.lkml` views, `.explore.lkml` explore(s), "
-        f"and `.model.lkml` files directly in your workspace. Build a clean, scalable architecture."
+        f"and `{looker_model}.model.lkml` directly in your workspace. Build a clean, scalable architecture."
     )
 
 def build_turn2_prompt(scenario_spec: Dict[str, Any]) -> str:
@@ -136,15 +162,52 @@ def run_multi_turn_mode_evaluation(
     # ----------------------------------------------------
     turn1_prompt = build_turn1_prompt(scenario_spec)
     print(f"  -> [Turn 1] Greenfield Architecture Prompt...")
+    turn1_timeout = 1200  # Give Greenfield architecture up to 20 mins to complete research & authoring
     turn1_res = driver.execute_turn(
         workspace_dir=workspace_dir,
         prompt=turn1_prompt,
         turn_num=1,
         skill_mode=skill_mode,
-        dry_run=dry_run
+        dry_run=dry_run,
+        timeout=turn1_timeout
     )
     turn1_lookml = collect_lookml_files(workspace_dir)
     print(f"  -> [Turn 1 Complete] LookML Files: {len(turn1_lookml)} | Tokens: {turn1_res.get('usage', {}).get('total_tokens', 0)}")
+    if turn1_res.get("status") == "timeout" or not turn1_lookml:
+        error_msg = f"CRITICAL ERROR: Turn 1 (Greenfield) failed for {skill_mode} (status='{turn1_res.get('status')}', files={len(turn1_lookml)}). Aborting evaluation for this mode to prevent corrupted incremental metrics."
+        print(f"\n  [ABORT] {error_msg}\n")
+        return {
+            "skill_mode": skill_mode,
+            "error": error_msg,
+            "turn1": {
+                "driver_result": turn1_res,
+                "lookml_files": turn1_lookml
+            },
+            "query_turns": {},
+            "agent_insights": [f"Turn 1 failed: {turn1_res.get('status')} (no initial model generated)."],
+            "maintainability_metrics": {
+                "turn1_tokens": turn1_res.get("usage", {}).get("total_tokens", 0),
+                "query_tokens": 0,
+                "total_tokens": turn1_res.get("usage", {}).get("total_tokens", 0),
+                "queries_served_without_changes": 0,
+                "pct_queries_served_without_changes": 0.0,
+                "total_query_lines_changed": 0,
+                "avg_lines_modified_per_query": 0.0,
+                "turn1_duration": turn1_res.get("duration_seconds", 0),
+                "query_duration": 0,
+                "total_duration": turn1_res.get("duration_seconds", 0),
+                "cumulative_diff": {
+                    "total_lines_changed": 0,
+                    "lines_added": 0,
+                    "lines_deleted": 0,
+                    "modified_files": [],
+                    "new_files": []
+                }
+            },
+            "linter_results": {"score": 0.0, "passed": 0, "total": 4, "checks": []},
+            "looker_validation": {"is_valid": False, "skipped": True, "reason": error_msg},
+            "looker_queries": {"status": "aborted_due_to_turn1_failure"}
+        }
 
     conversation_id = turn1_res.get("conversation_id")
 
@@ -153,6 +216,7 @@ def run_multi_turn_mode_evaluation(
     # ----------------------------------------------------
     user_questions = scenario_spec.get("userQuestions", {})
     query_turns_results = {}
+    agent_query_payloads = {}
     supported_queries = [
         (qk, qval) for qk, qval in user_questions.items() if qval.get("supported", True)
     ]
@@ -172,8 +236,8 @@ def run_multi_turn_mode_evaluation(
             f"Business Analytics Request for Query '{qk}':\n"
             f"Requirement: \"{prompt_text}\"\n\n"
             f"Please determine if your existing LookML model already supports this query requirement:\n"
-            f"- If YES (no LookML changes needed), output the exact Looker query payload JSON for this query (specifying 'model', 'view', 'fields', and optional 'filters').\n"
-            f"- If NO (incremental LookML changes needed), first update or create the required `.view.lkml` / `.explore.lkml` files in your workspace, and then output the Looker query payload JSON."
+            f"- If YES (no LookML changes needed), output the exact Looker query payload JSON for this query (specifying 'model': '{looker_eval.model_name}', 'view': '<explore_name>', 'fields': [...], and optional 'filters': {{...}}).\n"
+            f"- If NO (incremental LookML changes needed), first update or create the required `.view.lkml` / `.explore.lkml` files in your workspace, and then output the Looker query payload JSON with 'model': '{looker_eval.model_name}'."
         )
 
         pre_query_lookml = collect_lookml_files(workspace_dir)
@@ -185,7 +249,8 @@ def run_multi_turn_mode_evaluation(
             turn_num=turn_counter,
             skill_mode=skill_mode,
             dry_run=dry_run,
-            conversation_id=conversation_id
+            conversation_id=conversation_id,
+            timeout=600
         )
         if q_turn_res.get("conversation_id"):
             conversation_id = q_turn_res["conversation_id"]
@@ -194,6 +259,10 @@ def run_multi_turn_mode_evaluation(
         q_duration = q_turn_res.get("duration_seconds", 0)
         total_query_tokens += q_tokens
         total_query_duration += q_duration
+
+        agent_payload = extract_query_payload_from_response(q_turn_res.get("response", ""))
+        if agent_payload:
+            agent_query_payloads[qk] = agent_payload
 
         post_query_lookml = collect_lookml_files(workspace_dir)
         q_diff = compute_lookml_diff(pre_query_lookml, post_query_lookml)
@@ -224,6 +293,7 @@ def run_multi_turn_mode_evaluation(
             "turn_num": turn_counter,
             "prompt": prompt_text,
             "driver_result": q_turn_res,
+            "agent_query_payload": agent_payload,
             "lines_added": q_diff["lines_added"],
             "lines_deleted": q_diff["lines_deleted"],
             "total_lines_changed": lines_changed,
@@ -234,6 +304,39 @@ def run_multi_turn_mode_evaluation(
         }
 
         turn_counter += 1
+
+    # ----------------------------------------------------
+    # AGENT INSIGHTS TURN (Challenges Faced)
+    # ----------------------------------------------------
+    insights_prompt = (
+        "Reflect critically on the difficulties, friction, and limitations you encountered while completing this task.\n"
+        "In at most 3 concise bullet points, identify the specific pain points, unresolved challenges, or modeling friction you faced "
+        "(e.g., LookML language limitations, difficulty handling disparate table grains or nulls, awkwardness in measure definitions, "
+        "ambiguities in requirements, or lack of validation tooling).\n"
+        "Do NOT just summarize your architecture or describe what you built. Focus strictly on what was difficult, counter-intuitive, "
+        "or where you felt constrained."
+    )
+    print(f"  -> [Insights Turn {turn_counter}] Asking agent for key challenges and insights...")
+    insights_res = driver.execute_turn(
+        workspace_dir=workspace_dir,
+        prompt=insights_prompt,
+        turn_num=turn_counter,
+        skill_mode=skill_mode,
+        dry_run=dry_run,
+        conversation_id=conversation_id,
+        timeout=480
+    )
+    agent_insights = []
+    if insights_res.get("response"):
+        resp_text = insights_res["response"]
+        for line in resp_text.splitlines():
+            line_str = line.strip()
+            if line_str.startswith(("-", "*", "•", "1.", "2.", "3.")):
+                clean_bullet = re.sub(r"^[-*•\d.]+\s*", "", line_str).strip()
+                if clean_bullet:
+                    agent_insights.append(clean_bullet)
+        if not agent_insights and resp_text.strip():
+            agent_insights = [resp_text.strip()]
 
     final_lookml = collect_lookml_files(workspace_dir)
     cumulative_diff = compute_lookml_diff(turn1_lookml, final_lookml)
@@ -268,7 +371,10 @@ def run_multi_turn_mode_evaluation(
         # Level 3: Looker SQL Compilation & BigQuery Execution
         if looker_val.get("is_valid"):
             print(f"  [Level 3 Looker] Compiling queries & running live BigQuery execution...")
-            all_q_res = looker_eval.evaluate_scenario_questions(scenario_spec)
+            all_q_res = looker_eval.evaluate_scenario_questions(
+                scenario_spec,
+                agent_queries=agent_query_payloads
+            )
             if supported_queries:
                 supp_keys = {k for k, _ in supported_queries}
                 looker_queries = {k: v for k, v in all_q_res.items() if k in supp_keys}
@@ -287,6 +393,7 @@ def run_multi_turn_mode_evaluation(
             "lookml_files": turn1_lookml
         },
         "query_turns": query_turns_results,
+        "agent_insights": agent_insights[:3],
         "maintainability_metrics": {
             "turn1_tokens": turn1_res.get("usage", {}).get("total_tokens", 0),
             "query_turns_tokens": total_query_tokens,
@@ -308,24 +415,6 @@ def run_multi_turn_mode_evaluation(
         "looker_validation": looker_val,
         "looker_queries": looker_queries
     }
-
-def generate_markdown_report(
-    task_name: str,
-    scenario_spec: Dict[str, Any],
-    bq_stats: List[Dict[str, Any]],
-    with_skill: Dict[str, Any],
-    no_skill: Dict[str, Any],
-    export_dir: Path
-) -> str:
-    from eval.generate_rich_artifacts import generate_markdown_report_with_artifacts
-    return generate_markdown_report_with_artifacts(
-        task_name=task_name,
-        scenario_spec=scenario_spec,
-        bq_stats=bq_stats,
-        with_skill=with_skill,
-        no_skill=no_skill,
-        export_dir=export_dir
-    )
 
 def run_benchmark(
     tasks_dir: Path,
@@ -351,16 +440,18 @@ def run_benchmark(
     looker_eval = LookerEvaluator()
 
     # Pre-flight connectivity validation
+    looker_connected = False
     if not dry_run:
         print("\n[Pre-flight] Validating Looker API & BigQuery connectivity...")
-        if not looker_eval.ensure_authenticated():
+        looker_connected = looker_eval.ensure_authenticated()
+        if not looker_connected:
             print("\n=======================================================")
-            print("[ABORT] Looker API is NOT connected or session is invalid!")
-            print("Please ensure the SSH reverse tunnel on port 8445 is open from your workstation:")
-            print("  ssh -o StrictHostKeyChecking=no -N -R 8445:<LOOKER_HOST>:443 corpagent-eng-<USER>@mpl-<CAPSULE_NAME>.c.googlers.com")
+            print("[ABORT] Looker API authentication failed or connection unavailable.")
+            print("Please verify Looker API service availability and credentials.")
             print("=======================================================\n")
             sys.exit(1)
-        
+        print("[Pre-flight] Looker API verified successfully.\n")
+
         # Test BigQuery dataset accessibility
         try:
             res_bq = subprocess.run(["bq", "show", "--dataset", "bigquery-public-data:thelook_ecommerce"], capture_output=True, text=True, timeout=15)
@@ -368,7 +459,6 @@ def run_benchmark(
                 print(f"[Warning] BigQuery dataset check returned code {res_bq.returncode}: {res_bq.stderr}")
         except Exception as e:
             print(f"[Warning] Could not verify BigQuery dataset: {e}")
-        print("[Pre-flight] Looker API and BigQuery verified successfully.\n")
 
     all_results = {
         "benchmark_summary": {
@@ -378,7 +468,7 @@ def run_benchmark(
             "dry_run": dry_run,
             "light_mode": (max_queries is not None),
             "max_queries": max_queries,
-            "looker_connected": looker_eval.is_available()
+            "looker_connected": looker_connected
         },
         "tasks": []
     }
@@ -450,10 +540,6 @@ def run_benchmark(
         for fname, fcontent in res_no["final_lookml_files"].items():
             (no_skill_export_dir / fname).write_text(fcontent)
 
-        # Generate Markdown Report
-        md_report = generate_markdown_report(task_name, scenario_spec, bq_stats, res_with, res_no, task_export_dir)
-        (task_export_dir / "eval_report.md").write_text(md_report)
-
         task_entry = {
             "task_id": task_name,
             "scenario": scenario_spec.get("title", task_name),
@@ -493,8 +579,20 @@ def main():
     parser.add_argument("--light", action="store_true", help="Fast iteration mode (caps at 3 query turns)")
     parser.add_argument("--max-queries", type=int, default=None, help="Maximum number of query turns to evaluate")
     parser.add_argument("--out-dir", type=str, default="eval_exports", help="Export root directory")
+    parser.add_argument("--resume-from", type=str, default=None, help="Resume benchmark verification and reporting from an existing run directory checkpoint")
 
     args = parser.parse_args()
+
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        if not resume_path.exists():
+            print(f"[Error] Specified resume directory does not exist: {resume_path}")
+            sys.exit(1)
+        print(f"[Resume Checkpoint] Resuming verification & report generation from: {resume_path}")
+        from eval.generate_rich_artifacts import process_run_artifacts
+        process_run_artifacts(run_dir=resume_path, live_eval=True)
+        return
+
     tasks_dir = Path(args.tasks_dir)
     out_dir = Path(args.out_dir)
 
