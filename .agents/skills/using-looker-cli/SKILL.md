@@ -332,7 +332,52 @@ Combine `--template` with piping or file redirection to construct and submit POS
 
 ---
 
-## 5. Quick Reference Cheat Sheet
+## 5. Validating LookML Projects & Suppressing Context Window Bloat (`jq`)
+
+When validating a LookML project using `looker-cli api project validate_project <project_id>` or running local LookML parsers, the server/tool returns full project digests, AST representations, or hundreds of lines of file metadata. In multi-turn agent sessions, this can rapidly exhaust the context window and trigger truncation.
+
+### Recommended Pattern: Extract Only `.error` and `.errors`
+
+Always pipe the raw JSON validation output into `jq` to extract only the error diagnostics:
+
+```bash
+# Validate project and extract only top-level error and error array
+looker-cli api project validate_project <project_id> | jq '{error: .error, errors: .errors}'
+```
+
+### Focused Error Summary for Quick Diagnosis
+
+To inspect each error concisely without file blobs:
+
+```bash
+looker-cli api project validate_project <project_id> | jq '.errors[]? | {message: .message, file_path: .file_path, line_number: .line_number, severity: .severity}'
+```
+
+### Quick Success Check (Zero Errors)
+
+To test if a project is 100% clean:
+
+```bash
+looker-cli api project validate_project <project_id> | jq 'if (.errors | length) == 0 and (.error == null) then "VALIDATION_PASSED" else {error: .error, errors: .errors} end'
+```
+
+### Local LookML Parser (`lookml-parser`)
+
+When using `lookml-parser` (v9+), use the `--validation-mode` flag to return only validation errors rather than the full AST representation:
+
+```bash
+lookml-parser <file.lkml> --validation-mode
+```
+
+If using another local JSON-emitting parser or linter without built-in filtering:
+
+```bash
+<lookml-parser-command> | jq '{error: .error, errors: .errors}'
+```
+
+---
+
+## 6. Quick Reference Cheat Sheet
 
 | Task | Command |
 | :--- | :--- |
@@ -348,3 +393,7 @@ Combine `--template` with piping or file redirection to construct and submit POS
 | **Search Commands** | `looker-cli meta search <keyword>` |
 | **View Request Schema** | `looker-cli api <group> <endpoint> --describe-body` |
 | **Generate JSON Template** | `looker-cli api <group> <endpoint> --template` |
+| **Validate Project (Errors Only)** | `looker-cli api project validate_project <project_id> \| jq '{error: .error, errors: .errors}'` |
+| **Validate Project (Compact List)** | `looker-cli api project validate_project <project_id> \| jq '.errors[]? \| {message, file_path, line_number}'` |
+| **Local LookML Parser Errors** | `lookml-parser <file.lkml> --validation-mode` |
+

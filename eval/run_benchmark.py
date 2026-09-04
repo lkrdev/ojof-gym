@@ -155,6 +155,14 @@ def run_multi_turn_mode_evaluation(
     print(f"  Isolated Workspace: {workspace_dir}")
     print(f"  -------------------------------------------------------")
 
+    # Clean Looker remote workspace before Turn 1 to prevent stale files
+    if looker_eval.is_available():
+        print(f"  [Looker Dev Sandbox] Resetting remote workspace before Turn 1...")
+        try:
+            looker_eval.clean_remote_workspace()
+        except Exception as e:
+            print(f"  [Warning] Failed to clean remote Looker workspace: {e}")
+
     driver.setup_workspace(workspace_dir, task_dir, skill_mode)
 
     # ----------------------------------------------------
@@ -162,14 +170,14 @@ def run_multi_turn_mode_evaluation(
     # ----------------------------------------------------
     turn1_prompt = build_turn1_prompt(scenario_spec)
     print(f"  -> [Turn 1] Greenfield Architecture Prompt...")
-    turn1_timeout = 1200  # Give Greenfield architecture up to 20 mins to complete research & authoring
     turn1_res = driver.execute_turn(
         workspace_dir=workspace_dir,
         prompt=turn1_prompt,
         turn_num=1,
         skill_mode=skill_mode,
         dry_run=dry_run,
-        timeout=turn1_timeout
+        timeout_seconds=600,
+        warning_seconds=480
     )
     turn1_lookml = collect_lookml_files(workspace_dir)
     print(f"  -> [Turn 1 Complete] LookML Files: {len(turn1_lookml)} | Tokens: {turn1_res.get('usage', {}).get('total_tokens', 0)}")
@@ -371,17 +379,13 @@ def run_multi_turn_mode_evaluation(
         # Level 3: Looker SQL Compilation & BigQuery Execution
         if looker_val.get("is_valid"):
             print(f"  [Level 3 Looker] Compiling queries & running live BigQuery execution...")
-            all_q_res = looker_eval.evaluate_scenario_questions(
+            supp_keys = [k for k, _ in supported_queries] if supported_queries else None
+            looker_queries = looker_eval.evaluate_scenario_questions(
                 scenario_spec,
-                agent_queries=agent_query_payloads
+                target_questions=supp_keys
             )
-            if supported_queries:
-                supp_keys = {k for k, _ in supported_queries}
-                looker_queries = {k: v for k, v in all_q_res.items() if k in supp_keys}
-            else:
-                looker_queries = all_q_res
             passed_q = sum(1 for q in looker_queries.values() if isinstance(q, dict) and q.get('status') == 'passed')
-            total_q = sum(1 for q in scenario_spec.get('userQuestions', {}).values() if q.get('supported', True))
+            total_q = len(supp_keys) if supp_keys else sum(1 for q in scenario_spec.get('userQuestions', {}).values() if q.get('supported', True))
             print(f"  [Level 3 Looker] Queries Passing: {passed_q}/{total_q}")
         else:
             looker_queries = {"status": "skipped_due_to_validation_failure"}
@@ -422,6 +426,7 @@ def run_benchmark(
     model: str = "gemini-3.6-flash",
     dry_run: bool = True,
     output_dir: Path = Path("eval_exports"),
+    use_bwrap: bool = True,
     max_queries: Optional[int] = None
 ) -> Dict[str, Any]:
     if target_task:
@@ -436,7 +441,7 @@ def run_benchmark(
     run_export_dir = output_dir / f"run_{timestamp}"
     run_export_dir.mkdir(parents=True, exist_ok=True)
 
-    driver = AntigravityDriver(model=model, skip_permissions=not dry_run)
+    driver = AntigravityDriver(model=model, skip_permissions=not dry_run, use_bwrap=use_bwrap)
     looker_eval = LookerEvaluator()
 
     # Pre-flight connectivity validation
@@ -466,6 +471,7 @@ def run_benchmark(
             "total_tasks": len(task_dirs),
             "model": model,
             "dry_run": dry_run,
+            "sandboxing": "bwrap" if use_bwrap else "none",
             "light_mode": (max_queries is not None),
             "max_queries": max_queries,
             "looker_connected": looker_connected
@@ -579,6 +585,7 @@ def main():
     parser.add_argument("--light", action="store_true", help="Fast iteration mode (caps at 3 query turns)")
     parser.add_argument("--max-queries", type=int, default=None, help="Maximum number of query turns to evaluate")
     parser.add_argument("--out-dir", type=str, default="eval_exports", help="Export root directory")
+    parser.add_argument("--no-bwrap", action="store_true", help="Disable Bubblewrap (bwrap) sandbox filesystem isolation")
     parser.add_argument("--resume-from", type=str, default=None, help="Resume benchmark verification and reporting from an existing run directory checkpoint")
 
     args = parser.parse_args()
@@ -604,6 +611,7 @@ def main():
         model=args.model,
         dry_run=not args.execute,
         output_dir=out_dir,
+        use_bwrap=not args.no_bwrap,
         max_queries=max_q
     )
 

@@ -168,3 +168,15 @@ spectacles sql
 # Run Looker data tests:
 spectacles assert
 ```
+
+---
+
+## 8. Production Deployment Workaround (Sandbox / Ephemeral Testing)
+
+> [!NOTE]
+> **Temporary Workaround:** Enabling instance-level Looker feature flags (specifically `dev_mode_in_ca` for Conversational Analytics in developer workspaces) is an onerous process. Furthermore, on this dedicated testing/sandbox instance, there is only a single user running evaluations.
+>
+> To support queries against newly generated LookML without requiring `dev_mode_in_ca`, the evaluation harness automatically deploys the LookML project branch to production (`looker-cli project deploy <project_id>` / `POST /api/4.0/projects/{project_id}/deploy_to_production`) after each turn's LookML changes are validated and before preparing or executing queries.
+>
+> When the upstream Looker product change supporting native development mode in Conversational Analytics (`dev_mode_in_ca`) or dev-scoped session queries becomes available on this instance, this production deployment workaround can be deprecated to make the evaluation pipeline more streamlined.
+
