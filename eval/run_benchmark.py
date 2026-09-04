@@ -258,7 +258,7 @@ def run_multi_turn_mode_evaluation(
             skill_mode=skill_mode,
             dry_run=dry_run,
             conversation_id=conversation_id,
-            timeout=600
+            timeout_seconds=600
         )
         if q_turn_res.get("conversation_id"):
             conversation_id = q_turn_res["conversation_id"]
@@ -332,7 +332,7 @@ def run_multi_turn_mode_evaluation(
         skill_mode=skill_mode,
         dry_run=dry_run,
         conversation_id=conversation_id,
-        timeout=480
+        timeout_seconds=480
     )
     agent_insights = []
     if insights_res.get("response"):

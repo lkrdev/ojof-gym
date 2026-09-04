@@ -212,13 +212,16 @@ class AntigravityDriver:
         dry_run: bool = False,
         conversation_id: Optional[str] = None,
         timeout_seconds: int = 600,
-        warning_seconds: Optional[int] = 480
+        warning_seconds: Optional[int] = 480,
+        timeout: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Executes a single turn of interaction in the workspace.
         Enforces timeout_seconds (default: 600s = 10 minutes) and delivers an 80% time warning
         nudge via agentapi send-message at warning_seconds (default: 480s = 8 minutes).
         """
+        if timeout is not None:
+            timeout_seconds = timeout
         timeout_minutes = max(1, int(timeout_seconds / 60))
         cmd = [
             AGY_BIN,
