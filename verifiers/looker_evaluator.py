@@ -388,7 +388,8 @@ class LookerEvaluator:
         scenario_spec: Dict[str, Any],
         model_name: Optional[str] = None,
         explore_name: Optional[str] = None,
-        target_questions: Optional[List[str]] = None
+        target_questions: Optional[List[str]] = None,
+        agent_queries: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Tests each user question defined in the scenario spec against Looker.
@@ -440,6 +441,11 @@ class LookerEvaluator:
             if ca_result.get("success") and ca_result.get("query_payload"):
                 query_payload = ca_result["query_payload"]
                 generation_source = "looker_ca"
+                ca_thoughts = ca_result.get("thoughts", [])
+                ca_response = ca_result.get("response_text", [])
+            elif agent_queries and qkey in agent_queries and agent_queries[qkey]:
+                query_payload = agent_queries[qkey]
+                generation_source = "agent_generated"
                 ca_thoughts = ca_result.get("thoughts", [])
                 ca_response = ca_result.get("response_text", [])
             else:
