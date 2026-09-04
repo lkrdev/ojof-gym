@@ -30,9 +30,10 @@ def run_looker_cli(args: List[str], input_str: Optional[str] = None) -> subproce
     return subprocess.run(cmd, input=input_str, capture_output=True, text=True, env=env)
 
 class LookerEvaluator:
-    def __init__(self, project_id: str = "lookml_sandbox", connection_name: str = "default_bigquery_connection"):
-        self.project_id = os.environ.get("LOOKER_PROJECT", project_id)
+    def __init__(self, project_id: str = "lookml_sandbox", connection_name: str = "default_bigquery_connection", model_name: str = "sandbox"):
+        self.project_id = os.environ.get("LOOKER_PROJECT", os.environ.get("LOOKER_PROJECT_ID", project_id))
         self.connection_name = os.environ.get("LOOKER_CONNECTION", connection_name)
+        self.model_name = os.environ.get("LOOKER_MODEL", os.environ.get("LOOKER_MODEL_NAME", model_name))
 
     def is_available(self) -> bool:
         """Checks if looker-cli is available."""
