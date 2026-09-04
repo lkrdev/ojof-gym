@@ -915,7 +915,7 @@ def generate_html_report_with_artifacts(
             for q_obj in q_dict.values():
                 if isinstance(q_obj, dict):
                     err_str = str(q_obj.get("error", ""))
-                    if "connection refused" in err_str.lower() or "8445" in err_str:
+                    if "connection refused" in err_str.lower() or "failed to connect" in err_str.lower():
                         looker_conn_refused = True
                     if "view not found" in err_str.lower():
                         looker_view_not_found = True
