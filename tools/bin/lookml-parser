@@ -1,0 +1,133 @@
+#!/usr/bin/env node
+/**
+ * lookml-parser: Fast local LookML syntax validator.
+ * Powered by node-lookml-parser.
+ */
+const fs = require('fs');
+const path = require('path');
+
+const SCRIPT_DIR = __dirname;
+const PROJECT_TOOLS_DIR = path.resolve(SCRIPT_DIR, '..');
+const NODE_MODULES = path.join(PROJECT_TOOLS_DIR, 'node_modules');
+
+let parse;
+try {
+  parse = require(path.join(NODE_MODULES, 'lookml-parser', 'lib', 'parse', 'index.js'));
+} catch (e) {
+  try {
+    parse = require('lookml-parser/lib/parse/index.js');
+  } catch (err) {
+    console.error(`Error loading lookml-parser: ${err.message}`);
+    process.exit(1);
+  }
+}
+
+const args = process.argv.slice(2);
+let validationMode = false;
+const files = [];
+
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === '--validation-mode' || arg === '-v' || arg === '--validationMode') {
+    validationMode = true;
+  } else if (arg.startsWith('--input=')) {
+    files.push(arg.slice('--input='.length));
+  } else if (arg === '-i' && i + 1 < args.length) {
+    files.push(args[++i]);
+  } else if (!arg.startsWith('-')) {
+    files.push(arg);
+  }
+}
+
+if (files.length === 0) {
+  const cwd = process.cwd();
+  function walkDir(dir) {
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          walkDir(full);
+        } else if (entry.name.endsWith('.lkml')) {
+          files.push(full);
+        }
+      }
+    } catch (e) {}
+  }
+  walkDir(cwd);
+}
+
+if (files.length === 0) {
+  console.log(JSON.stringify({
+    status: "VALIDATION_PASSED",
+    files_checked: 0,
+    errors: [],
+    message: "No .lkml files found to parse."
+  }, null, 2));
+  process.exit(0);
+}
+
+let totalErrors = 0;
+const results = [];
+
+for (const fpath of files) {
+  if (!fs.existsSync(fpath)) {
+    results.push({
+      file: fpath,
+      status: "FILE_NOT_FOUND",
+      errors: [`File does not exist: ${fpath}`]
+    });
+    totalErrors++;
+    continue;
+  }
+
+  const content = fs.readFileSync(fpath, 'utf-8');
+  try {
+    const parsed = parse(content);
+    results.push({
+      file: path.relative(process.cwd(), fpath) || fpath,
+      status: "VALIDATION_PASSED",
+      errors: []
+    });
+  } catch (err) {
+    totalErrors++;
+    const errMsg = err.message || err.toString();
+    const loc = err.location || {};
+    results.push({
+      file: path.relative(process.cwd(), fpath) || fpath,
+      status: "VALIDATION_FAILED",
+      errors: [{
+        message: errMsg,
+        line: loc.start ? loc.start.line : (err.line || 1),
+        column: loc.start ? loc.start.column : (err.column || 1)
+      }]
+    });
+  }
+}
+
+if (validationMode) {
+  const summary = {
+    status: totalErrors === 0 ? "VALIDATION_PASSED" : "VALIDATION_FAILED",
+    total_files: files.length,
+    error_count: totalErrors,
+    results: results
+  };
+  console.log(JSON.stringify(summary, null, 2));
+} else {
+  if (totalErrors === 0) {
+    console.log(`[lookml-parser] All ${files.length} LookML file(s) parsed successfully with 0 errors.`);
+  } else {
+    console.error(`[lookml-parser] Parsing failed with ${totalErrors} error(s):`);
+    for (const r of results) {
+      if (r.status !== "VALIDATION_PASSED") {
+        console.error(`  - ${r.file}:`);
+        for (const e of r.errors) {
+          console.error(`      ${typeof e === 'object' ? `Line ${e.line}, Col ${e.column}: ${e.message}` : e}`);
+        }
+      }
+    }
+  }
+}
+
+process.exit(totalErrors === 0 ? 0 : 1);

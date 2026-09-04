@@ -136,6 +136,7 @@ class AntigravityDriver:
             # Allow agent CLI to write logs, cache, and state
             "--bind-try", str(Path.home() / ".config"), str(Path.home() / ".config"),
             "--bind-try", str(Path.home() / ".cache"), str(Path.home() / ".cache"),
+            "--bind-try", str(Path.home() / ".local"), str(Path.home() / ".local"),
             "--bind", str(resolved_ws), str(resolved_ws),
         ]
 
@@ -259,6 +260,9 @@ class AntigravityDriver:
             }
 
         env = os.environ.copy()
+        local_bin = str(Path.home() / ".local" / "bin")
+        tools_bin = str((PROJECT_ROOT / "tools" / "bin").resolve())
+        env["PATH"] = f"{local_bin}:{tools_bin}:{env.get('PATH', '')}"
         print(f"    [AntigravityDriver] Executing Turn {turn_num} ({skill_mode}) in {workspace_dir.name} [bwrap: {self.use_bwrap}, timeout: {timeout_seconds}s]...")
 
         captured_conversation_id = conversation_id
@@ -413,6 +417,17 @@ class AntigravityDriver:
         
         # Skill isolation
         skills_dest = workspace_dir / ".agents" / "skills"
+        skills_dest.mkdir(parents=True, exist_ok=True)
+
+        # Always provide the general Looker CLI & validator skill to both with-skill and no-skill
+        looker_cli_src = PROJECT_ROOT / ".agents" / "skills" / "using-looker-cli"
+        if not looker_cli_src.exists():
+            looker_cli_src = task_dir / "environment" / "skills" / "using-looker-cli"
+        if looker_cli_src.exists():
+            cli_dest = skills_dest / "using-looker-cli"
+            cli_dest.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(looker_cli_src, cli_dest, dirs_exist_ok=True)
+
         if skill_mode == "with-skill":
             skills_src = PROJECT_ROOT / ".agents" / "skills" / "lookml-ojof"
             if not skills_src.exists():
@@ -422,8 +437,9 @@ class AntigravityDriver:
                 ojof_dest.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(skills_src, ojof_dest, dirs_exist_ok=True)
         else:
-            if (workspace_dir / ".agents").exists():
-                shutil.rmtree(workspace_dir / ".agents")
+            ojof_dest = skills_dest / "lookml-ojof"
+            if ojof_dest.exists():
+                shutil.rmtree(ojof_dest)
 
 def main():
     parser = argparse.ArgumentParser(description="Antigravity Driver CLI with Bubblewrap Sandboxing")

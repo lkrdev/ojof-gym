@@ -7,3 +7,5 @@ eval_exports/
 .venv/
 *.bundle
 *.sock
+node_modules/
+tools/node_modules/

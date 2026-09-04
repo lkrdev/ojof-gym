@@ -236,6 +236,9 @@ def run_multi_turn_mode_evaluation(
     queries_served_without_changes = 0
     total_query_lines_changed = 0
     total_query_tokens = 0
+    total_query_input_tokens = 0
+    total_query_cached_tokens = 0
+    total_query_output_tokens = 0
     total_query_duration = 0
 
     for qk, qval in supported_queries:
@@ -263,9 +266,17 @@ def run_multi_turn_mode_evaluation(
         if q_turn_res.get("conversation_id"):
             conversation_id = q_turn_res["conversation_id"]
 
-        q_tokens = q_turn_res.get("usage", {}).get("total_tokens", 0)
+        q_usage = q_turn_res.get("usage", {})
+        q_tokens = q_usage.get("total_tokens", 0)
+        q_input_tokens = q_usage.get("input_tokens", 0)
+        q_cached_tokens = q_usage.get("cached_tokens", 0)
+        q_output_tokens = q_usage.get("output_tokens", 0)
         q_duration = q_turn_res.get("duration_seconds", 0)
+
         total_query_tokens += q_tokens
+        total_query_input_tokens += q_input_tokens
+        total_query_cached_tokens += q_cached_tokens
+        total_query_output_tokens += q_output_tokens
         total_query_duration += q_duration
 
         agent_payload = extract_query_payload_from_response(q_turn_res.get("response", ""))
@@ -280,8 +291,16 @@ def run_multi_turn_mode_evaluation(
         served_without_changes = (lines_changed == 0)
         if served_without_changes:
             queries_served_without_changes += 1
+        else:
+            # Sync incremental changes to Looker dev workspace immediately
+            if looker_eval.is_available() and not dry_run:
+                try:
+                    print(f"     [Looker Sync] Syncing Turn {turn_counter} LookML changes to Looker dev workspace...")
+                    looker_eval.sync_files_to_looker(workspace_dir)
+                except Exception as sync_err:
+                    print(f"     [Looker Sync Error] {sync_err}")
 
-        print(f"     [Query '{qk}'] Lines Changed: {lines_changed} (+{q_diff['lines_added']} / -{q_diff['lines_deleted']}) | Served Without Changes: {served_without_changes}")
+        print(f"     [Query '{qk}'] Lines Changed: {lines_changed} (+{q_diff['lines_added']} / -{q_diff['lines_deleted']}) | Served Without Changes: {served_without_changes} | Duration: {q_duration:.1f}s")
 
         # Compute turn diff text
         diff_text_lines = []
@@ -302,6 +321,11 @@ def run_multi_turn_mode_evaluation(
             "prompt": prompt_text,
             "driver_result": q_turn_res,
             "agent_query_payload": agent_payload,
+            "total_tokens": q_tokens,
+            "input_tokens": q_input_tokens,
+            "cached_tokens": q_cached_tokens,
+            "output_tokens": q_output_tokens,
+            "duration_seconds": q_duration,
             "lines_added": q_diff["lines_added"],
             "lines_deleted": q_diff["lines_deleted"],
             "total_lines_changed": lines_changed,
@@ -317,12 +341,13 @@ def run_multi_turn_mode_evaluation(
     # AGENT INSIGHTS TURN (Challenges Faced)
     # ----------------------------------------------------
     insights_prompt = (
-        "Reflect critically on the difficulties, friction, and limitations you encountered while completing this task.\n"
-        "In at most 3 concise bullet points, identify the specific pain points, unresolved challenges, or modeling friction you faced "
-        "(e.g., LookML language limitations, difficulty handling disparate table grains or nulls, awkwardness in measure definitions, "
-        "ambiguities in requirements, or lack of validation tooling).\n"
-        "Do NOT just summarize your architecture or describe what you built. Focus strictly on what was difficult, counter-intuitive, "
-        "or where you felt constrained."
+        "Report ONLY genuine bugs, missing CLI tools, tooling defects, or environment blockers you encountered during this run.\n"
+        "RULES:\n"
+        "1. Do NOT describe the views you created, fields you added, or tasks you successfully completed.\n"
+        "2. Do NOT summarize your architecture or boast about your modeling decisions.\n"
+        "3. Only state concrete issues, failed commands (e.g. missing permissions, CLI crashes), or tool limitations.\n"
+        "4. If everything worked as expected without blockers or missing tools, respond with exactly: 'No blockers or tooling defects encountered.'\n"
+        "Format as at most 3 concise bullet points."
     )
     print(f"  -> [Insights Turn {turn_counter}] Asking agent for key challenges and insights...")
     insights_res = driver.execute_turn(
@@ -382,7 +407,8 @@ def run_multi_turn_mode_evaluation(
             supp_keys = [k for k, _ in supported_queries] if supported_queries else None
             looker_queries = looker_eval.evaluate_scenario_questions(
                 scenario_spec,
-                target_questions=supp_keys
+                target_questions=supp_keys,
+                agent_queries=agent_query_payloads
             )
             passed_q = sum(1 for q in looker_queries.values() if isinstance(q, dict) and q.get('status') == 'passed')
             total_q = len(supp_keys) if supp_keys else sum(1 for q in scenario_spec.get('userQuestions', {}).values() if q.get('supported', True))
@@ -400,9 +426,17 @@ def run_multi_turn_mode_evaluation(
         "agent_insights": agent_insights[:3],
         "maintainability_metrics": {
             "turn1_tokens": turn1_res.get("usage", {}).get("total_tokens", 0),
+            "turn1_input_tokens": turn1_res.get("usage", {}).get("input_tokens", 0),
+            "turn1_cached_tokens": turn1_res.get("usage", {}).get("cached_tokens", 0),
+            "turn1_output_tokens": turn1_res.get("usage", {}).get("output_tokens", 0),
             "query_turns_tokens": total_query_tokens,
+            "query_turns_input_tokens": total_query_input_tokens,
+            "query_turns_cached_tokens": total_query_cached_tokens,
+            "query_turns_output_tokens": total_query_output_tokens,
+            "avg_tokens_per_query": total_query_tokens / num_supported,
             "turn1_duration_seconds": turn1_res.get("duration_seconds", 0),
             "query_turns_duration_seconds": total_query_duration,
+            "avg_duration_seconds_per_query": total_query_duration / num_supported,
             "queries_served_without_changes": queries_served_without_changes,
             "total_supported_queries": num_supported,
             "pct_queries_served_without_changes": pct_served_without_changes,

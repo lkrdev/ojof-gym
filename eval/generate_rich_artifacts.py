@@ -192,8 +192,16 @@ def run_full_query_and_sample(evaluator: LookerEvaluator, query_payload: Dict[st
         if os.path.exists(tf_path):
             os.remove(tf_path)
 
-def fetch_bq_job_metrics_for_query(evaluator: LookerEvaluator, approx_timestamp: str, query_sql: str) -> Dict[str, Any]:
-    """Queries bigquery_information_schema in Looker to get job metrics."""
+def fetch_bq_job_metrics_for_query(
+    evaluator: LookerEvaluator,
+    approx_timestamp: str = "",
+    query_sql: str = "",
+    exclude_job_ids: Optional[Set[str]] = None,
+    expected_dataset: str = "thelook_ecommerce"
+) -> Dict[str, Any]:
+    """Queries bigquery_information_schema in Looker to get job metrics, excluding information schema queries."""
+    if exclude_job_ids is None:
+        exclude_job_ids = set()
     evaluator.ensure_authenticated()
     today_encoded = urllib.parse.quote(datetime.date.today().strftime("%Y/%m/%d"))
     
@@ -203,18 +211,21 @@ def fetch_bq_job_metrics_for_query(evaluator: LookerEvaluator, approx_timestamp:
         "fields": [
             "jobs.job_id",
             "jobs.creation_time",
+            "jobs.statement_type",
+            "jobs.referenced_tables",
             "jobs.total_processed_bytes",
             "job_stages.total_shuffle_output_bytes",
             "jobs.total_spill_to_disk_bytes",
             "jobs.total_slot_ms",
             "jobs.runtime_ms",
-            "jobs.query_text"
+            "jobs.looker_history_id"
         ],
         "filters": {
-            "jobs.creation_date": "today"
+            "jobs.creation_date": "today",
+            "jobs.statement_type": "SELECT"
         },
         "sorts": ["jobs.creation_time desc"],
-        "limit": "15"
+        "limit": "30"
     }
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
@@ -227,19 +238,33 @@ def fetch_bq_job_metrics_for_query(evaluator: LookerEvaluator, approx_timestamp:
             try:
                 jobs = json.loads(res.stdout)
                 if isinstance(jobs, list) and jobs:
-                    j = jobs[0]
-                    jid = j.get("jobs.job_id", "")
-                    dash_link = f"/dashboards/bigquery_information_schema::job_lookup_dashboard?Job+ID={urllib.parse.quote(jid)}&Created={today_encoded}"
-                    return {
-                        "job_id": jid,
-                        "creation_time": j.get("jobs.creation_time"),
-                        "bytes_scanned": j.get("jobs.total_processed_bytes", 0),
-                        "bytes_shuffled": j.get("job_stages.total_shuffle_output_bytes", 0),
-                        "bytes_spilled": j.get("jobs.total_spill_to_disk_bytes", 0),
-                        "slot_ms": j.get("jobs.total_slot_ms", 0),
-                        "runtime_ms": j.get("jobs.runtime_ms", 0),
-                        "dashboard_link": dash_link
-                    }
+                    for j in jobs:
+                        jid = j.get("jobs.job_id", "")
+                        if not jid or jid in exclude_job_ids:
+                            continue
+                        
+                        ref_tables_raw = str(j.get("jobs.referenced_tables", "") or "")
+                        # Exclude self-referential information schema queries
+                        if "INFORMATION_SCHEMA" in ref_tables_raw.upper():
+                            exclude_job_ids.add(jid)
+                            continue
+
+                        # Match target dataset if present
+                        if expected_dataset and expected_dataset not in ref_tables_raw:
+                            continue
+
+                        exclude_job_ids.add(jid)
+                        dash_link = f"/dashboards/bigquery_information_schema::job_lookup_dashboard?Job+ID={urllib.parse.quote(jid)}&Created={today_encoded}"
+                        return {
+                            "job_id": jid,
+                            "creation_time": j.get("jobs.creation_time"),
+                            "bytes_scanned": j.get("jobs.total_processed_bytes", 0),
+                            "bytes_shuffled": j.get("job_stages.total_shuffle_output_bytes", 0),
+                            "bytes_spilled": j.get("jobs.total_spill_to_disk_bytes", 0),
+                            "slot_ms": j.get("jobs.total_slot_ms", 0),
+                            "runtime_ms": j.get("jobs.runtime_ms", 0),
+                            "dashboard_link": dash_link
+                        }
             except Exception:
                 pass
     finally:
@@ -351,6 +376,7 @@ def process_run_artifacts(run_dir: Path, live_eval: bool = False):
 
                 mode_data["looker_queries"] = query_results
                 mode_data["bq_job_analysis"] = {}
+                attributed_job_ids = set()
 
                 for qkey, qdata in query_results.items():
                     if not qdata.get("supported", True):
@@ -386,7 +412,13 @@ def process_run_artifacts(run_dir: Path, live_eval: bool = False):
 
                     # D. Fetch BQ Job Performance from INFORMATION_SCHEMA
                     if q_sql and q_sql != "(SQL compilation failed)" and run_res.get("status") == "success":
-                        bq_metrics = fetch_bq_job_metrics_for_query(evaluator, approx_timestamp="", query_sql=q_sql)
+                        bq_metrics = fetch_bq_job_metrics_for_query(
+                            evaluator,
+                            approx_timestamp="",
+                            query_sql=q_sql,
+                            exclude_job_ids=attributed_job_ids,
+                            expected_dataset="thelook_ecommerce"
+                        )
                     else:
                         bq_metrics = {
                             "job_id": "N/A",

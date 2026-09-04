@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""
+looker-sync: Unified remote Looker dev workspace sync and validation CLI.
+Pushes local LookML files into Looker sandbox in dev mode and runs remote project validation.
+"""
+import sys
+import os
+import re
+import json
+import tempfile
+import argparse
+import subprocess
+from pathlib import Path
+
+PROJECT_ID = os.environ.get("LOOKER_PROJECT_ID", "lookml_sandbox")
+CONNECTION_NAME = os.environ.get("LOOKER_CONNECTION_NAME", "default_bigquery_connection")
+WITH_LOOKER_BIN = os.path.expanduser("~/.local/bin/with-looker")
+
+def run_looker_cmd(cmd_args, input_str=None):
+    base = []
+    if os.path.exists(WITH_LOOKER_BIN):
+        base.append(WITH_LOOKER_BIN)
+    base.append("looker-cli")
+    full_cmd = base + cmd_args
+    return subprocess.run(
+        full_cmd,
+        input=input_str,
+        capture_output=True,
+        text=True
+    )
+
+def sync_and_validate(target_dir: Path):
+    target_dir = target_dir.resolve()
+    print(f"[looker-sync] Scanning for LookML files in: {target_dir}")
+    lkml_files = list(target_dir.rglob("*.lkml"))
+    lkml_files = [f for f in lkml_files if ".agents" not in str(f) and ".system" not in str(f)]
+    
+    if not lkml_files:
+        print(f"[looker-sync] Warning: No .lkml files found in {target_dir}")
+        return 0
+
+    print(f"[looker-sync] Found {len(lkml_files)} LookML file(s).")
+    
+    # 1. Ensure dev mode
+    res_session = run_looker_cmd(["session", "update", "dev"])
+    if res_session.returncode != 0:
+        print(f"[looker-sync] Warning updating session to dev mode: {res_session.stderr.strip() or res_session.stdout.strip()}")
+
+    # 2. Ensure project checkout
+    run_looker_cmd(["project", "checkout", PROJECT_ID, "master"])
+
+    # 3. Sync each file
+    synced = 0
+    sync_errors = []
+    for fpath in lkml_files:
+        rel_name = fpath.name
+        content = fpath.read_text(encoding="utf-8")
+        
+        # Normalize includes
+        content = re.sub(r'include:\s*["\']/?(?:views/|explores/)?[^"\']*/(\*\.view(?:\.lkml)?)["\']', r'include: "\1"', content)
+        content = re.sub(r'include:\s*["\']/?(?:views/|explores/)?[^"\']*/(\*\.explore(?:\.lkml)?)["\']', r'include: "\1"', content)
+        content = re.sub(r'include:\s*["\']/?views/([^"\']+\.view(?:\.lkml)?)["\']', r'include: "\1"', content)
+        
+        if rel_name.endswith(".model.lkml"):
+            content = re.sub(r'connection:\s*["\'][^"\']+["\']', f'connection: "{CONNECTION_NAME}"', content)
+            if 'include: "*.view.lkml"' not in content and 'include: "*.view"' not in content:
+                content = 'include: "*.view.lkml"\n' + content
+            if 'include: "*.explore.lkml"' not in content and 'include: "*.explore"' not in content:
+                content = 'include: "*.explore.lkml"\n' + content
+        elif rel_name.endswith(".explore.lkml"):
+            if 'include: "*.view.lkml"' not in content and 'include: "*.view"' not in content:
+                content = 'include: "*.view.lkml"\n' + content
+
+        with tempfile.NamedTemporaryFile("w", suffix=".lkml", delete=False) as tf:
+            tf.write(content)
+            tf_path = tf.name
+
+        try:
+            res_up = run_looker_cmd(["project", "file", "update", PROJECT_ID, rel_name, tf_path])
+            if res_up.returncode == 0:
+                synced += 1
+            else:
+                res_cr = run_looker_cmd(["project", "file", "create", PROJECT_ID, rel_name, tf_path])
+                if res_cr.returncode == 0:
+                    synced += 1
+                else:
+                    sync_errors.append(f"Failed to sync {rel_name}: {res_cr.stderr.strip() or res_up.stderr.strip()}")
+        finally:
+            if os.path.exists(tf_path):
+                os.remove(tf_path)
+
+    print(f"[looker-sync] Pushed {synced}/{len(lkml_files)} file(s) to Looker project '{PROJECT_ID}'.")
+    if sync_errors:
+        for err in sync_errors:
+            print(f"  [Error] {err}")
+
+    # 4. Validate project
+    print(f"[looker-sync] Running Looker remote project validation...")
+    res_val = run_looker_cmd(["api", "project", "validate_project", PROJECT_ID])
+    if res_val.returncode != 0:
+        print(f"[looker-sync] Validation command failed: {res_val.stderr.strip() or res_val.stdout.strip()}")
+        return 1
+
+    try:
+        val_data = json.loads(res_val.stdout)
+    except Exception as e:
+        print(f"[looker-sync] Validation output (raw): {res_val.stdout.strip()}")
+        return 0
+
+    errors = val_data.get("errors", [])
+    if not errors and not val_data.get("error"):
+        print(f"\x1b[32m[looker-sync] Looker Remote Validation PASSED (0 errors).\x1b[0m")
+        return 0
+    else:
+        print(f"\x1b[31m[looker-sync] Looker Remote Validation FAILED ({len(errors)} error(s)):\x1b[0m")
+        for err in errors:
+            msg = err.get("message", "")
+            fpath = err.get("file_path", "")
+            lno = err.get("line_number", "")
+            sev = err.get("severity", "error")
+            print(f"  - [{sev.upper()}] {fpath}:{lno}: {msg}")
+        return 1
+
+def main():
+    parser = argparse.ArgumentParser(description="Sync local LookML to Looker sandbox and run remote validation.")
+    parser.add_argument("directory", nargs="?", default=".", help="Directory containing .lkml files (default: current directory)")
+    args = parser.parse_args()
+    ret = sync_and_validate(Path(args.directory))
+    sys.exit(ret)
+
+if __name__ == "__main__":
+    main()
