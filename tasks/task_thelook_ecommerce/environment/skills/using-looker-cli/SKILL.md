@@ -399,16 +399,28 @@ This single command:
 
 ### Database Query Execution & Dry-Runs
 
-> **Important**: The agent environment does **not** have direct BigQuery IAM permissions to run raw queries (`bq query --dry_run` will fail with insufficient permissions).
->
-> All database access, SQL compilation, and query testing is managed through Looker:
-> - **To compile LookML to SQL:**
->   `looker-cli api query run_inline_query sql <query_payload.json>`
-> - **To execute a test query:**
->   `looker-cli api query run_inline_query json <query_payload.json>`
-> - **To validate models:**
->   `lookml-parser --validation-mode` (fast local syntax check)
->   `looker-sync` (full remote project validation)
+If your task environment provides a BigQuery execution service account (configured via `CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT` or `GOOGLE_APPLICATION_CREDENTIALS`), you can run dry-run queries and inspect dataset tables:
+
+- **To run a BigQuery dry-run (validate SQL & check bytes processed):**
+  ```bash
+  bq query --use_legacy_sql=false --dry_run "<SQL_QUERY>"
+  ```
+- **To inspect dataset tables and schemas:**
+  ```bash
+  bq show --dataset bigquery-public-data:thelook_ecommerce
+  bq show --format=prettyjson bigquery-public-data:thelook_ecommerce.orders
+  ```
+- **To compile LookML queries to SQL via Looker:**
+  ```bash
+  looker-cli api query run_inline_query sql <query_payload.json>
+  ```
+- **To execute LookML queries and inspect returned rows via Looker:**
+  ```bash
+  looker-cli api query run_inline_query json <query_payload.json>
+  ```
+- **To validate LookML models:**
+  `lookml-parser --validation-mode` (fast local syntax check)
+  `looker-sync` (full remote project validation)
 
 ---
 
@@ -418,6 +430,8 @@ This single command:
 | :--- | :--- |
 | **Fast Local LookML Validation** | `lookml-parser --validation-mode` |
 | **Remote Sync & Validate** | `looker-sync` |
+| **BigQuery Dry-Run** | `bq query --use_legacy_sql=false --dry_run "<SQL>"` |
+| **Inspect Table Schema** | `bq show --format=prettyjson <dataset>.<table>` |
 | **Compile LookML Query to SQL** | `looker-cli api query run_inline_query sql <query.json>` |
 | **Run LookML Query (JSON rows)** | `looker-cli api query run_inline_query json <query.json>` |
 | **Add Profile** | `looker-cli profile add dev --host dev.looker.com --port 443` |

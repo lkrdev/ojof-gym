@@ -263,6 +263,24 @@ class AntigravityDriver:
         local_bin = str(Path.home() / ".local" / "bin")
         tools_bin = str((PROJECT_ROOT / "tools" / "bin").resolve())
         env["PATH"] = f"{local_bin}:{tools_bin}:{env.get('PATH', '')}"
+
+        # Configure BigQuery credentials & project for agent under evaluation
+        agent_sa = os.environ.get("AGENT_SERVICE_ACCOUNT")
+        project_id = (
+            os.environ.get("BIGQUERY_PROJECT_ID")
+            or os.environ.get("CLOUDSDK_CORE_PROJECT")
+            or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        )
+        sa_key_path = os.environ.get("AGENT_SA_KEY_PATH") or str(Path.home() / ".config" / "gcloud" / "agent-sa-key.json")
+
+        if os.path.exists(sa_key_path):
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = sa_key_path
+        elif agent_sa:
+            env["CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT"] = agent_sa
+
+        if project_id:
+            env["CLOUDSDK_CORE_PROJECT"] = project_id
+
         print(f"    [AntigravityDriver] Executing Turn {turn_num} ({skill_mode}) in {workspace_dir.name} [bwrap: {self.use_bwrap}, timeout: {timeout_seconds}s]...")
 
         captured_conversation_id = conversation_id

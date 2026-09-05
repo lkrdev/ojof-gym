@@ -454,6 +454,59 @@ def run_multi_turn_mode_evaluation(
         "looker_queries": looker_queries
     }
 
+def load_local_env():
+    """Loads .env or .env.local if present in project root (parameterized environment config)."""
+    for env_name in [".env.local", ".env"]:
+        env_path = PROJECT_ROOT / env_name
+        if env_path.exists():
+            try:
+                for line in env_path.read_text().splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+            except Exception:
+                pass
+
+def check_service_account_connectivity() -> Tuple[bool, str]:
+    """
+    Validates that the required service accounts (agent runner and harness)
+    and BigQuery project are configured and functional.
+    """
+    project_id = (
+        os.environ.get("BIGQUERY_PROJECT_ID")
+        or os.environ.get("CLOUDSDK_CORE_PROJECT")
+        or os.environ.get("GOOGLE_CLOUD_PROJECT")
+    )
+    agent_sa = os.environ.get("AGENT_SERVICE_ACCOUNT")
+    harness_sa = os.environ.get("HARNESS_SERVICE_ACCOUNT")
+    sa_key_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or str(Path.home() / ".config" / "gcloud" / "harness-sa-key.json")
+
+    if not project_id:
+        return False, "BIGQUERY_PROJECT_ID (or CLOUDSDK_CORE_PROJECT) is not set."
+
+    if not agent_sa and not os.path.exists(sa_key_path):
+        return False, "AGENT_SERVICE_ACCOUNT (or agent SA key) is not configured."
+
+    # Test BigQuery job creation / dry-run capability
+    cmd = ["bq", "query", "--use_legacy_sql=false", "--dry_run", f"--project_id={project_id}"]
+    if harness_sa and not os.path.exists(sa_key_path):
+        cmd.append(f"--impersonate_service_account={harness_sa}")
+    cmd.append("SELECT 1")
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip()
+            return False, f"BigQuery query test failed with code {res.returncode}: {err}"
+    except Exception as e:
+        return False, f"BigQuery test command execution failed: {e}"
+
+    return True, f"Service account and BigQuery connectivity verified on project '{project_id}'."
+
 def run_benchmark(
     tasks_dir: Path,
     target_task: Optional[str] = None,
@@ -463,6 +516,8 @@ def run_benchmark(
     use_bwrap: bool = True,
     max_queries: Optional[int] = None
 ) -> Dict[str, Any]:
+    load_local_env()
+
     if target_task:
         task_dirs = [tasks_dir / target_task]
     else:
@@ -481,7 +536,7 @@ def run_benchmark(
     # Pre-flight connectivity validation
     looker_connected = False
     if not dry_run:
-        print("\n[Pre-flight] Validating Looker API & BigQuery connectivity...")
+        print("\n[Pre-flight] Validating Looker API & Service Account connectivity...")
         looker_connected = looker_eval.ensure_authenticated()
         if not looker_connected:
             print("\n=======================================================")
@@ -489,7 +544,22 @@ def run_benchmark(
             print("Please verify Looker API service availability and credentials.")
             print("=======================================================\n")
             sys.exit(1)
-        print("[Pre-flight] Looker API verified successfully.\n")
+        print("[Pre-flight] Looker API verified successfully.")
+
+        # Service Account / BigQuery availability check
+        sa_ok, sa_msg = check_service_account_connectivity()
+        if not sa_ok:
+            print("\n=======================================================")
+            print("[ABORT] BigQuery / Service Account validation failed.")
+            print(f"Reason: {sa_msg}")
+            print("\nPlease ensure your service accounts are configured in .env.local:")
+            print("  BIGQUERY_PROJECT_ID=<YOUR_PROJECT_ID>")
+            print("  AGENT_SERVICE_ACCOUNT=<AGENT_SA_EMAIL>")
+            print("  HARNESS_SERVICE_ACCOUNT=<HARNESS_SA_EMAIL>")
+            print("And ensure active authentication (e.g. gcloud auth login or SA key).")
+            print("=======================================================\n")
+            sys.exit(1)
+        print(f"[Pre-flight] {sa_msg}\n")
 
         # Test BigQuery dataset accessibility
         try:
