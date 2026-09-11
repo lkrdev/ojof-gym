@@ -1,133 +1,203 @@
-#!/usr/bin/env node
-/**
- * lookml-parser: Fast local LookML syntax validator.
- * Powered by node-lookml-parser.
- */
-const fs = require('fs');
-const path = require('path');
+#!/usr/bin/env python3
+"""
+Fast local LookML syntax and structure validator.
+Self-contained Python implementation replacing external node-lookml-parser dependency.
+Supports --validation-mode / -v and -i / --input=<file>.
+"""
 
-const SCRIPT_DIR = __dirname;
-const PROJECT_TOOLS_DIR = path.resolve(SCRIPT_DIR, '..');
-const NODE_MODULES = path.join(PROJECT_TOOLS_DIR, 'node_modules');
+import sys
+import os
+import re
+import json
+from pathlib import Path
 
-let parse;
-try {
-  parse = require(path.join(NODE_MODULES, 'lookml-parser', 'lib', 'parse', 'index.js'));
-} catch (e) {
-  try {
-    parse = require('lookml-parser/lib/parse/index.js');
-  } catch (err) {
-    console.error(`Error loading lookml-parser: ${err.message}`);
-    process.exit(1);
-  }
-}
+def validate_lookml_content(content: str):
+    """
+    Validates LookML syntax for balanced braces, brackets, block definitions, and double semicolons.
+    Returns list of error dicts: [{"line": int, "column": int, "message": str}].
+    """
+    errors = []
+    lines = content.splitlines()
 
-const args = process.argv.slice(2);
-let validationMode = false;
-const files = [];
+    brace_stack = []     # List of (char, line_no, col_no)
+    sql_block_open = None # (line_no, col_no)
 
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-  if (arg === '--validation-mode' || arg === '-v' || arg === '--validationMode') {
-    validationMode = true;
-  } else if (arg.startsWith('--input=')) {
-    files.push(arg.slice('--input='.length));
-  } else if (arg === '-i' && i + 1 < args.length) {
-    files.push(args[++i]);
-  } else if (!arg.startsWith('-')) {
-    files.push(arg);
-  }
-}
+    for lno, line in enumerate(lines, start=1):
+        # Strip comments
+        code = line.split('#')[0]
+        col = 0
+        while col < len(code):
+            ch = code[col]
 
-if (files.length === 0) {
-  const cwd = process.cwd();
-  function walkDir(dir) {
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.name.startsWith('.') || entry.name === 'node_modules') continue;
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walkDir(full);
-        } else if (entry.name.endsWith('.lkml')) {
-          files.push(full);
+            # Track SQL block (sql: ... ;;)
+            if sql_block_open is not None:
+                if code[col:col+2] == ';;':
+                    sql_block_open = None
+                    col += 2
+                    continue
+                col += 1
+                continue
+
+            # Check start of sql block
+            m_sql = re.match(r'\b(sql|sql_on|sql_table_name|html|expression_custom_filter)\s*:', code[col:])
+            if m_sql:
+                # Find if ;; is on the same line
+                rest = code[col + m_sql.end():]
+                if ';;' not in rest:
+                    sql_block_open = (lno, col + 1)
+                col += m_sql.end()
+                continue
+
+            # String literal skipping
+            if ch == '"':
+                col += 1
+                while col < len(code):
+                    if code[col] == '\\':
+                        col += 2
+                    elif code[col] == '"':
+                        col += 1
+                        break
+                    else:
+                        col += 1
+                continue
+
+            # Braces and brackets
+            if ch in '{[':
+                brace_stack.append((ch, lno, col + 1))
+            elif ch in '}]':
+                expected = '{' if ch == '}' else '['
+                if not brace_stack:
+                    errors.append({
+                        "message": f"Unexpected closing '{ch}' with no matching open delimiter",
+                        "line": lno,
+                        "column": col + 1
+                    })
+                else:
+                    open_ch, open_line, open_col = brace_stack.pop()
+                    if open_ch != expected:
+                        errors.append({
+                            "message": f"Mismatched delimiter: expected '{'}' if open_ch == '{' else ']'}' matching line {open_line}:{open_col}, got '{ch}'",
+                            "line": lno,
+                            "column": col + 1
+                        })
+            col += 1
+
+    if sql_block_open:
+        s_line, s_col = sql_block_open
+        errors.append({
+            "message": f"Unterminated SQL block starting at line {s_line}:{s_col} (missing ';;')",
+            "line": s_line,
+            "column": s_col
+        })
+
+    while brace_stack:
+        open_ch, open_line, open_col = brace_stack.pop()
+        expected = '}' if open_ch == '{' else ']'
+        errors.append({
+            "message": f"Unclosed delimiter '{open_ch}' from line {open_line}:{open_col} (expected '{expected}')",
+            "line": open_line,
+            "column": open_col
+        })
+
+    return errors
+
+def main():
+    args = sys.argv[1:]
+    validation_mode = False
+    files = []
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--validation-mode", "-v", "--validationMode"):
+            validation_mode = True
+        elif arg.startswith("--input="):
+            files.append(arg[len("--input="):])
+        elif arg == "-i" and i + 1 < len(args):
+            i += 1
+            files.append(args[i])
+        elif not arg.startswith("-"):
+            files.append(arg)
+        i += 1
+
+    if not files:
+        cwd = Path.cwd()
+        for p in cwd.rglob("*.lkml"):
+            if ".system" in str(p) or ".agents" in str(p) or ".git" in str(p) or "node_modules" in str(p):
+                continue
+            files.append(str(p))
+
+    if not files:
+        if validation_mode:
+            print(json.dumps({
+                "status": "VALIDATION_PASSED",
+                "total_files": 0,
+                "error_count": 0,
+                "results": [],
+                "message": "No .lkml files found to parse."
+            }, indent=2))
+        else:
+            print("[lookml-parser] No .lkml files found to parse.")
+        sys.exit(0)
+
+    total_errors = 0
+    results = []
+
+    for fpath_str in files:
+        fpath = Path(fpath_str)
+        if not fpath.exists():
+            results.append({
+                "file": fpath_str,
+                "status": "FILE_NOT_FOUND",
+                "errors": [{"message": f"File does not exist: {fpath_str}", "line": 1, "column": 1}]
+            })
+            total_errors += 1
+            continue
+
+        try:
+            content = fpath.read_text(encoding="utf-8")
+            errs = validate_lookml_content(content)
+            if errs:
+                total_errors += len(errs)
+                results.append({
+                    "file": str(fpath.relative_to(Path.cwd())) if fpath.is_relative_to(Path.cwd()) else str(fpath),
+                    "status": "VALIDATION_FAILED",
+                    "errors": errs
+                })
+            else:
+                results.append({
+                    "file": str(fpath.relative_to(Path.cwd())) if fpath.is_relative_to(Path.cwd()) else str(fpath),
+                    "status": "VALIDATION_PASSED",
+                    "errors": []
+                })
+        except Exception as e:
+            total_errors += 1
+            results.append({
+                "file": fpath_str,
+                "status": "VALIDATION_FAILED",
+                "errors": [{"message": f"Read/Parse exception: {str(e)}", "line": 1, "column": 1}]
+            })
+
+    if validation_mode:
+        summary = {
+            "status": "VALIDATION_PASSED" if total_errors == 0 else "VALIDATION_FAILED",
+            "total_files": len(files),
+            "error_count": total_errors,
+            "results": results
         }
-      }
-    } catch (e) {}
-  }
-  walkDir(cwd);
-}
+        print(json.dumps(summary, indent=2))
+    else:
+        if total_errors == 0:
+            print(f"[lookml-parser] All {len(files)} LookML file(s) parsed successfully with 0 errors.")
+        else:
+            print(f"[lookml-parser] Parsing failed with {total_errors} error(s):", file=sys.stderr)
+            for r in results:
+                if r["status"] != "VALIDATION_PASSED":
+                    print(f"  - {r['file']}:", file=sys.stderr)
+                    for e in r["errors"]:
+                        print(f"      Line {e['line']}, Col {e['column']}: {e['message']}", file=sys.stderr)
 
-if (files.length === 0) {
-  console.log(JSON.stringify({
-    status: "VALIDATION_PASSED",
-    files_checked: 0,
-    errors: [],
-    message: "No .lkml files found to parse."
-  }, null, 2));
-  process.exit(0);
-}
+    sys.exit(0 if total_errors == 0 else 1)
 
-let totalErrors = 0;
-const results = [];
-
-for (const fpath of files) {
-  if (!fs.existsSync(fpath)) {
-    results.push({
-      file: fpath,
-      status: "FILE_NOT_FOUND",
-      errors: [`File does not exist: ${fpath}`]
-    });
-    totalErrors++;
-    continue;
-  }
-
-  const content = fs.readFileSync(fpath, 'utf-8');
-  try {
-    const parsed = parse(content);
-    results.push({
-      file: path.relative(process.cwd(), fpath) || fpath,
-      status: "VALIDATION_PASSED",
-      errors: []
-    });
-  } catch (err) {
-    totalErrors++;
-    const errMsg = err.message || err.toString();
-    const loc = err.location || {};
-    results.push({
-      file: path.relative(process.cwd(), fpath) || fpath,
-      status: "VALIDATION_FAILED",
-      errors: [{
-        message: errMsg,
-        line: loc.start ? loc.start.line : (err.line || 1),
-        column: loc.start ? loc.start.column : (err.column || 1)
-      }]
-    });
-  }
-}
-
-if (validationMode) {
-  const summary = {
-    status: totalErrors === 0 ? "VALIDATION_PASSED" : "VALIDATION_FAILED",
-    total_files: files.length,
-    error_count: totalErrors,
-    results: results
-  };
-  console.log(JSON.stringify(summary, null, 2));
-} else {
-  if (totalErrors === 0) {
-    console.log(`[lookml-parser] All ${files.length} LookML file(s) parsed successfully with 0 errors.`);
-  } else {
-    console.error(`[lookml-parser] Parsing failed with ${totalErrors} error(s):`);
-    for (const r of results) {
-      if (r.status !== "VALIDATION_PASSED") {
-        console.error(`  - ${r.file}:`);
-        for (const e of r.errors) {
-          console.error(`      ${typeof e === 'object' ? `Line ${e.line}, Col ${e.column}: ${e.message}` : e}`);
-        }
-      }
-    }
-  }
-}
-
-process.exit(totalErrors === 0 ? 0 : 1);
+if __name__ == "__main__":
+    main()

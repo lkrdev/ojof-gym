@@ -106,7 +106,8 @@ class AntigravityDriver:
     def build_bwrap_command(
         self,
         base_cmd: List[str],
-        workspace_dir: Path
+        workspace_dir: Path,
+        isolated_gemini_dir: Optional[Path] = None
     ) -> List[str]:
         """
         Wraps base_cmd with Bubblewrap (bwrap) for filesystem isolation.
@@ -130,15 +131,17 @@ class AntigravityDriver:
             "--dev", "/dev",
             "--proc", "/proc",
             "--tmpfs", "/tmp",
-            "--tmpfs", "/run",
-            "--dir", "/run/user",
-            "--bind-try", f"/run/user/{uid}", f"/run/user/{uid}",
+            # Satisfies Google LOAS2 SafeLocalFile::IsRootUid() inside unprivileged user namespaces
+            "--setenv", "TEST_TMPDIR", "/tmp",
             # Allow agent CLI to write logs, cache, and state
             "--bind-try", str(Path.home() / ".config"), str(Path.home() / ".config"),
             "--bind-try", str(Path.home() / ".cache"), str(Path.home() / ".cache"),
             "--bind-try", str(Path.home() / ".local"), str(Path.home() / ".local"),
             "--bind", str(resolved_ws), str(resolved_ws),
         ]
+
+        if isolated_gemini_dir:
+            bwrap_cmd.extend(["--bind", str(isolated_gemini_dir.resolve()), str(isolated_gemini_dir.resolve())])
 
         # Support platform/environment specific binds (e.g. credentials, tokens, agent configs)
         extra_binds_env = os.environ.get("BWRAP_EXTRA_BINDS", "")
@@ -175,6 +178,7 @@ class AntigravityDriver:
             Path.home() / ".ssh",
             Path.home() / ".gnupg",
             Path.home() / ".aws",
+            Path.home() / ".gemini",
         ]:
             if candidate.exists() and candidate not in paths_to_mask:
                 paths_to_mask.append(candidate)
@@ -241,10 +245,17 @@ class AntigravityDriver:
         if turn_num > 1 and conversation_id:
             cmd.extend(["--conversation", conversation_id])
 
+        # Isolate agent application data directory per workspace
+        # to prevent headless benchmark runs from polluting host user config
+        # and leaking into user session listings.
+        isolated_gemini_dir = (workspace_dir.parent / f".gemini_{workspace_dir.name}").resolve()
+        isolated_gemini_dir.mkdir(parents=True, exist_ok=True)
+        cmd.extend(["--gemini_dir", str(isolated_gemini_dir)])
+
         cmd.extend(["--print", prompt])
 
         if self.use_bwrap:
-            full_cmd = self.build_bwrap_command(cmd, workspace_dir)
+            full_cmd = self.build_bwrap_command(cmd, workspace_dir, isolated_gemini_dir=isolated_gemini_dir)
         else:
             full_cmd = cmd
 
@@ -436,18 +447,28 @@ class AntigravityDriver:
         # Skill isolation
         skills_dest = workspace_dir / ".agents" / "skills"
         skills_dest.mkdir(parents=True, exist_ok=True)
+        skills_library = PROJECT_ROOT / "tools" / "skills"
 
-        # Always provide the general Looker CLI & validator skill to both with-skill and no-skill
-        looker_cli_src = PROJECT_ROOT / ".agents" / "skills" / "using-looker-cli"
-        if not looker_cli_src.exists():
-            looker_cli_src = task_dir / "environment" / "skills" / "using-looker-cli"
-        if looker_cli_src.exists():
-            cli_dest = skills_dest / "using-looker-cli"
-            cli_dest.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(looker_cli_src, cli_dest, dirs_exist_ok=True)
+        # Baseline LookML developer skills provided to both with-skill and no-skill
+        baseline_skills = [
+            "using-looker-cli",
+            "lookml-explore",
+            "lookml-fields",
+            "lookml-liquid",
+            "lookml-model",
+            "lookml-view",
+        ]
+        for sname in baseline_skills:
+            src = skills_library / sname
+            if not src.exists():
+                src = task_dir / "environment" / "skills" / sname
+            if src.exists():
+                dest = skills_dest / sname
+                dest.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dest, dirs_exist_ok=True)
 
         if skill_mode == "with-skill":
-            skills_src = PROJECT_ROOT / ".agents" / "skills" / "lookml-ojof"
+            skills_src = skills_library / "lookml-ojof"
             if not skills_src.exists():
                 skills_src = task_dir / "environment" / "skills" / "lookml-ojof"
             if skills_src.exists():

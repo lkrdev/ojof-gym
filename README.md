@@ -78,6 +78,15 @@ looker-cli session get
 ### BigQuery Credentials
 Ensure Google Cloud Application Default Credentials (ADC) or `gcloud` authentication are active to allow query dry-runs and performance telemetry collection.
 
+### Pre-Flight Environment Validation
+Before launching runs, you can deterministically verify all CLI tools (`agy`, `bq`, `looker-cli`), local validators (`lookml-parser`, `looker-sync`), Looker API sessions, and BigQuery service account authentication:
+
+```bash
+python3 eval/validate_environment.py
+# Or equivalently:
+python3 eval/run_benchmark.py --validate-env
+```
+
 ---
 
 ## 4. Running the Benchmark

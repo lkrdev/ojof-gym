@@ -19,7 +19,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -492,13 +492,13 @@ def check_service_account_connectivity() -> Tuple[bool, str]:
         return False, "AGENT_SERVICE_ACCOUNT (or agent SA key) is not configured."
 
     # Test BigQuery job creation / dry-run capability
-    cmd = ["bq", "query", "--use_legacy_sql=false", "--dry_run", f"--project_id={project_id}"]
+    cmd = ["bq", "query", "--use_legacy_sql=false", "--dry_run", f"--project_id={project_id}", "SELECT 1"]
+    env = os.environ.copy()
     if harness_sa and not os.path.exists(sa_key_path):
-        cmd.append(f"--impersonate_service_account={harness_sa}")
-    cmd.append("SELECT 1")
+        env["CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT"] = harness_sa
 
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
         if res.returncode != 0:
             err = res.stderr.strip() or res.stdout.strip()
             return False, f"BigQuery query test failed with code {res.returncode}: {err}"
@@ -623,11 +623,22 @@ def run_benchmark(
             max_queries=max_queries
         )
 
-        # Export LookML files
+        # Export LookML files & agent execution logs
         with_skill_export_dir = task_export_dir / "with_skill" / "lookml"
         with_skill_export_dir.mkdir(parents=True, exist_ok=True)
-        for fname, fcontent in res_with["final_lookml_files"].items():
+        for fname, fcontent in res_with.get("final_lookml_files", {}).items():
             (with_skill_export_dir / fname).write_text(fcontent)
+
+        with_skill_gemini = isolated_base / f".gemini_{with_skill_ws.name}"
+        if with_skill_gemini.exists():
+            with_skill_logs_dir = task_export_dir / "with_skill" / "agent_logs"
+            with_skill_logs_dir.mkdir(parents=True, exist_ok=True)
+            for item in with_skill_gemini.rglob("*"):
+                if item.is_file() and (".log" in item.name or ".db" in item.name):
+                    try:
+                        shutil.copy2(item, with_skill_logs_dir / item.name)
+                    except Exception:
+                        pass
 
         # ----------------------------------------------------
         # 2. Run WITHOUT skill (Multi-Turn Lifecycle)
@@ -644,11 +655,22 @@ def run_benchmark(
             max_queries=max_queries
         )
 
-        # Export LookML files
+        # Export LookML files & agent execution logs
         no_skill_export_dir = task_export_dir / "no_skill" / "lookml"
         no_skill_export_dir.mkdir(parents=True, exist_ok=True)
-        for fname, fcontent in res_no["final_lookml_files"].items():
+        for fname, fcontent in res_no.get("final_lookml_files", {}).items():
             (no_skill_export_dir / fname).write_text(fcontent)
+
+        no_skill_gemini = isolated_base / f".gemini_{no_skill_ws.name}"
+        if no_skill_gemini.exists():
+            no_skill_logs_dir = task_export_dir / "no_skill" / "agent_logs"
+            no_skill_logs_dir.mkdir(parents=True, exist_ok=True)
+            for item in no_skill_gemini.rglob("*"):
+                if item.is_file() and (".log" in item.name or ".db" in item.name):
+                    try:
+                        shutil.copy2(item, no_skill_logs_dir / item.name)
+                    except Exception:
+                        pass
 
         task_entry = {
             "task_id": task_name,
@@ -690,9 +712,15 @@ def main():
     parser.add_argument("--max-queries", type=int, default=None, help="Maximum number of query turns to evaluate")
     parser.add_argument("--out-dir", type=str, default="eval_exports", help="Export root directory")
     parser.add_argument("--no-bwrap", action="store_true", help="Disable Bubblewrap (bwrap) sandbox filesystem isolation")
+    parser.add_argument("--validate-env", action="store_true", help="Run deterministic environment and connectivity validation (eval/validate_environment.py) and exit")
     parser.add_argument("--resume-from", type=str, default=None, help="Resume benchmark verification and reporting from an existing run directory checkpoint")
 
     args = parser.parse_args()
+
+    if args.validate_env:
+        from eval.validate_environment import main as validate_main
+        validate_main()
+        return
 
     if args.resume_from:
         resume_path = Path(args.resume_from)
