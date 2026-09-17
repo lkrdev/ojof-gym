@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from eval.generate_rich_artifacts import generate_markdown_report_with_artifacts as generate_markdown_report
+from eval.generate_rich_artifacts import generate_html_report_with_artifacts as generate_html_report
 
 def get_bigquery_table_stats(dataset: str) -> list:
     return []
@@ -34,11 +34,31 @@ def rebuild_run_report(
 ):
     print(f"[Report Rebuilder] Rebuilding report from saved artifacts in: {run_dir}")
     eval_json_path = run_dir / "eval_results.json"
-    if not eval_json_path.exists():
-        raise FileNotFoundError(f"Missing eval_results.json in {run_dir}")
+    master_results = {"tasks": []}
+    if eval_json_path.exists() and eval_json_path.stat().st_size > 0:
+        try:
+            with open(eval_json_path) as f:
+                master_results = json.load(f)
+        except Exception as e:
+            print(f"  [Warning] Could not parse {eval_json_path}: {e}")
 
-    with open(eval_json_path) as f:
-        master_results = json.load(f)
+    try:
+        from eval.generate_rich_artifacts import process_run_artifacts
+        process_run_artifacts(run_dir)
+        print("[Report Rebuilder] Successfully rebuilt rich HTML/Markdown artifacts.")
+        return
+    except Exception as e:
+        print(f"  [Warning] process_run_artifacts encountered: {e}")
+
+    if not master_results.get("tasks"):
+        # Auto-discover task folders
+        for td in sorted(run_dir.glob("task_*")):
+            if td.is_dir():
+                master_results["tasks"].append({
+                    "task_id": td.name,
+                    "with_skill": {},
+                    "no_skill": {}
+                })
 
     looker_eval = LookerEvaluator() if re_verify_looker else None
 
@@ -75,6 +95,7 @@ def rebuild_run_report(
                 looker_eval.sync_files_to_looker(with_skill_ws)
                 task_data["with_skill"]["looker_validation"] = looker_eval.validate_project()
                 if task_data["with_skill"]["looker_validation"].get("is_valid"):
+                    looker_eval.deploy_to_production()
                     task_data["with_skill"]["looker_queries"] = looker_eval.evaluate_scenario_questions(scenario_spec)
 
             if no_skill_ws.exists():
@@ -82,10 +103,11 @@ def rebuild_run_report(
                 looker_eval.sync_files_to_looker(no_skill_ws)
                 task_data["no_skill"]["looker_validation"] = looker_eval.validate_project()
                 if task_data["no_skill"]["looker_validation"].get("is_valid"):
+                    looker_eval.deploy_to_production()
                     task_data["no_skill"]["looker_queries"] = looker_eval.evaluate_scenario_questions(scenario_spec)
 
-        # Regenerate HTML and Markdown Report
-        report_content = generate_markdown_report(
+        # Regenerate HTML Report
+        report_content = generate_html_report(
             task_name=task_id,
             scenario_spec=scenario_spec,
             bq_stats=bq_stats,
@@ -93,18 +115,20 @@ def rebuild_run_report(
             no_skill=task_data["no_skill"],
             export_dir=task_dir
         )
-        report_file_md = task_dir / "eval_report.md"
-        report_file_md.write_text(report_content)
         report_file_html = task_dir / "eval_report.html"
         report_file_html.write_text(report_content)
-        print(f"  [OK] Saved updated reports: {report_file_html} and {report_file_md}")
+        print(f"  [OK] Saved updated report: {report_file_html}")
 
         artifact_dir = os.environ.get("ARTIFACT_DIR")
         if artifact_dir and Path(artifact_dir).exists():
-            art_file_md = Path(artifact_dir) / f"{scenario_name}_evaluation_report.md"
-            art_file_md.write_text(report_content)
             art_file_html = Path(artifact_dir) / f"{scenario_name}_evaluation_report.html"
             art_file_html.write_text(report_content)
+            meta_path = Path(artifact_dir) / f"{scenario_name}_evaluation_report.html.metadata.json"
+            meta_path.write_text(json.dumps({
+                "summary": f"Interactive HTML evaluation report for {scenario_name} benchmark.",
+                "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "userFacing": True
+            }, indent=2))
             print(f"  [OK] Exported to artifact directory: {art_file_html}")
 
     # Save updated master JSON

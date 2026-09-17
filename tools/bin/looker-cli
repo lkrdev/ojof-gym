@@ -1,0 +1,28 @@
+#!/bin/bash
+# Wrapper ensuring looker-cli resolves Looker endpoint via with-looker if available,
+# or invokes system looker-cli directly.
+WITH_LOOKER="$HOME/.local/bin/with-looker"
+REAL_LOOKER_CLI=""
+
+# Locate real looker-cli avoiding recursion
+for candidate in "$HOME/.local/bin/looker-cli" "/usr/local/bin/looker-cli" "/usr/bin/looker-cli"; do
+    if [ -x "$candidate" ] && [ "$(realpath "$candidate")" != "$(realpath "$0")" ]; then
+        REAL_LOOKER_CLI="$candidate"
+        break
+    fi
+done
+
+if [ -z "$REAL_LOOKER_CLI" ]; then
+    REAL_LOOKER_CLI="$(which -a looker-cli | grep -v "$0" | head -n 1)"
+fi
+
+if [ -z "$REAL_LOOKER_CLI" ]; then
+    echo "[looker-cli wrapper] Error: Underlying looker-cli binary not found in PATH." >&2
+    exit 1
+fi
+
+if [ -x "$WITH_LOOKER" ]; then
+    exec "$WITH_LOOKER" "$REAL_LOOKER_CLI" "$@"
+else
+    exec "$REAL_LOOKER_CLI" "$@"
+fi

@@ -1,4 +1,5 @@
-.env
+*.env
+.env*
 .bak # Working directory only files
 __pycache__
 logs/
@@ -6,3 +7,5 @@ eval_exports/
 .venv/
 *.bundle
 *.sock
+node_modules/
+tools/node_modules/

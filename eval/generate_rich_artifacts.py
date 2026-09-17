@@ -8,6 +8,8 @@ Generates rich HTML and Markdown benchmark artifact bundles from persisted run d
 5. Generates self-contained HTML and Markdown comparative evaluation reports
 """
 
+from __future__ import annotations
+
 import csv
 import datetime
 import difflib
@@ -26,9 +28,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from eval.run_benchmark import get_bigquery_table_stats
+from verifiers.looker_evaluator import run_looker_cli, LookerEvaluator
+
+def get_bigquery_table_stats(dataset: str) -> List[Dict[str, Any]]:
+    """Fetches table names and row counts with persistent disk cache."""
+    if not dataset:
+        return []
+    clean_ds = dataset.replace(".", ":") if ":" not in dataset and "." in dataset else dataset
+    cache_file = PROJECT_ROOT / "eval_exports" / ".bq_table_cache.json"
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text())
+            if clean_ds in cache:
+                return cache[clean_ds]
+        except Exception:
+            pass
+    from eval.run_benchmark import get_bigquery_table_stats as fetch_stats
+    return fetch_stats(dataset)
+
 from verifiers.ojof_linter import audit_lookml_directory
-from verifiers.looker_evaluator import LookerEvaluator, run_looker_cli
 
 def generate_unified_diff(turn1_files: Dict[str, str], turn2_files: Dict[str, str]) -> str:
     """Generates a complete multi-file unified diff string."""
@@ -101,6 +119,31 @@ def format_pct_delta(val_with: float, val_base: float, reverse_is_better: bool =
     cls = "delta-good" if is_good else "delta-bad"
     return f'<span class="delta {cls}">{sign}{pct:.1f}%</span>'
 
+def render_sql_tokens_badges(expected_tokens: List[str], compiled_sql: str) -> str:
+    """Renders green/red badges indicating whether expected SQL elements are present."""
+    if not expected_tokens:
+        return '<span style="color: #5f6368; font-style: italic; font-size: 12px;">None specified</span>'
+    
+    badges = []
+    for token in expected_tokens:
+        tok_clean = token.strip()
+        is_matched = False
+        if compiled_sql and compiled_sql != "(SQL compilation failed)":
+            if tok_clean.upper() in ["COUNT_DISTINCT", "COUNT(DISTINCT)"]:
+                is_matched = bool(re.search(r"COUNT\s*\(\s*DISTINCT\b", compiled_sql, re.IGNORECASE))
+            elif tok_clean.upper() in ["SUM", "COUNT", "AVG", "MIN", "MAX", "GROUP BY", "WHERE", "HAVING"]:
+                is_matched = bool(re.search(rf"\b{re.escape(tok_clean)}\b", compiled_sql, re.IGNORECASE))
+            else:
+                col_name = tok_clean.split(".")[-1] if "." in tok_clean else tok_clean
+                is_matched = bool(re.search(rf"\b{re.escape(col_name)}\b", compiled_sql, re.IGNORECASE))
+        
+        if is_matched:
+            badges.append(f'<span class="badge" style="display: inline-block; background: #e6f4ea; color: #137333; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; margin: 2px 4px 2px 0; border: 1px solid #ceead6; font-weight: 600;">✔ {html.escape(tok_clean)}</span>')
+        else:
+            badges.append(f'<span class="badge" style="display: inline-block; background: #fce8e6; color: #c5221f; padding: 2px 6px; border-radius: 4px; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; margin: 2px 4px 2px 0; border: 1px solid #fad2cf; font-weight: 600;">✖ {html.escape(tok_clean)}</span>')
+            
+    return "".join(badges)
+
 def clean_sql_display(sql_text: str) -> str:
     """Removes trailing artificial limits from SQL display."""
     if not sql_text:
@@ -149,8 +192,16 @@ def run_full_query_and_sample(evaluator: LookerEvaluator, query_payload: Dict[st
         if os.path.exists(tf_path):
             os.remove(tf_path)
 
-def fetch_bq_job_metrics_for_query(evaluator: LookerEvaluator, approx_timestamp: str, query_sql: str) -> Dict[str, Any]:
-    """Queries bigquery_information_schema in Looker to get job metrics."""
+def fetch_bq_job_metrics_for_query(
+    evaluator: LookerEvaluator,
+    approx_timestamp: str = "",
+    query_sql: str = "",
+    exclude_job_ids: Optional[Set[str]] = None,
+    expected_dataset: str = "thelook_ecommerce"
+) -> Dict[str, Any]:
+    """Queries bigquery_information_schema in Looker to get job metrics, excluding information schema queries."""
+    if exclude_job_ids is None:
+        exclude_job_ids = set()
     evaluator.ensure_authenticated()
     today_encoded = urllib.parse.quote(datetime.date.today().strftime("%Y/%m/%d"))
     
@@ -160,18 +211,21 @@ def fetch_bq_job_metrics_for_query(evaluator: LookerEvaluator, approx_timestamp:
         "fields": [
             "jobs.job_id",
             "jobs.creation_time",
+            "jobs.statement_type",
+            "jobs.referenced_tables",
             "jobs.total_processed_bytes",
             "job_stages.total_shuffle_output_bytes",
             "jobs.total_spill_to_disk_bytes",
             "jobs.total_slot_ms",
             "jobs.runtime_ms",
-            "jobs.query_text"
+            "jobs.looker_history_id"
         ],
         "filters": {
-            "jobs.creation_date": "today"
+            "jobs.creation_date": "today",
+            "jobs.statement_type": "SELECT"
         },
         "sorts": ["jobs.creation_time desc"],
-        "limit": "15"
+        "limit": "30"
     }
 
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
@@ -184,39 +238,52 @@ def fetch_bq_job_metrics_for_query(evaluator: LookerEvaluator, approx_timestamp:
             try:
                 jobs = json.loads(res.stdout)
                 if isinstance(jobs, list) and jobs:
-                    j = jobs[0]
-                    jid = j.get("jobs.job_id", "")
-                    dash_link = f"/dashboards/bigquery_information_schema::job_lookup_dashboard?Job+ID={urllib.parse.quote(jid)}&Created={today_encoded}"
-                    return {
-                        "job_id": jid,
-                        "creation_time": j.get("jobs.creation_time"),
-                        "bytes_scanned": j.get("jobs.total_processed_bytes", 0),
-                        "bytes_shuffled": j.get("job_stages.total_shuffle_output_bytes", 0),
-                        "bytes_spilled": j.get("jobs.total_spill_to_disk_bytes", 0),
-                        "slot_ms": j.get("jobs.total_slot_ms", 0),
-                        "runtime_ms": j.get("jobs.runtime_ms", 0),
-                        "dashboard_link": dash_link
-                    }
+                    for j in jobs:
+                        jid = j.get("jobs.job_id", "")
+                        if not jid or jid in exclude_job_ids:
+                            continue
+                        
+                        ref_tables_raw = str(j.get("jobs.referenced_tables", "") or "")
+                        # Exclude self-referential information schema queries
+                        if "INFORMATION_SCHEMA" in ref_tables_raw.upper():
+                            exclude_job_ids.add(jid)
+                            continue
+
+                        # Match target dataset if present
+                        if expected_dataset and expected_dataset not in ref_tables_raw:
+                            continue
+
+                        exclude_job_ids.add(jid)
+                        dash_link = f"/dashboards/bigquery_information_schema::job_lookup_dashboard?Job+ID={urllib.parse.quote(jid)}&Created={today_encoded}"
+                        return {
+                            "job_id": jid,
+                            "creation_time": j.get("jobs.creation_time"),
+                            "bytes_scanned": j.get("jobs.total_processed_bytes", 0),
+                            "bytes_shuffled": j.get("job_stages.total_shuffle_output_bytes", 0),
+                            "bytes_spilled": j.get("jobs.total_spill_to_disk_bytes", 0),
+                            "slot_ms": j.get("jobs.total_slot_ms", 0),
+                            "runtime_ms": j.get("jobs.runtime_ms", 0),
+                            "dashboard_link": dash_link
+                        }
             except Exception:
                 pass
     finally:
         if os.path.exists(tf_path):
             os.remove(tf_path)
 
-    # Fallback estimate
-    today_encoded = urllib.parse.quote(datetime.date.today().strftime("%Y/%m/%d"))
+    # If no job is found or query failed, return clean zeros and N/A
     return {
-        "job_id": "job_auto_tracked",
-        "bytes_scanned": 12940000,
-        "bytes_shuffled": 450000,
+        "job_id": "N/A",
+        "bytes_scanned": 0,
+        "bytes_shuffled": 0,
         "bytes_spilled": 0,
-        "slot_ms": 1250,
-        "runtime_ms": 1850,
-        "dashboard_link": f"/dashboards/bigquery_information_schema::job_lookup_dashboard?Created={today_encoded}"
+        "slot_ms": 0,
+        "runtime_ms": 0,
+        "dashboard_link": ""
     }
 
-def process_run_artifacts(run_dir: Path):
-    print(f"[Artifact Generator] Processing run: {run_dir}")
+def process_run_artifacts(run_dir: Path, live_eval: bool = False):
+    print(f"[Artifact Generator] Processing run: {run_dir} (live_eval={live_eval})")
     eval_json_path = run_dir / "eval_results.json"
     if not eval_json_path.exists():
         raise FileNotFoundError(f"Missing {eval_json_path}")
@@ -224,8 +291,11 @@ def process_run_artifacts(run_dir: Path):
     with open(eval_json_path) as f:
         master_results = json.load(f)
 
-    evaluator = LookerEvaluator()
-    evaluator.ensure_authenticated()
+    evaluator = None
+    if live_eval:
+        from verifiers.looker_evaluator import LookerEvaluator
+        evaluator = LookerEvaluator()
+        evaluator.ensure_authenticated()
 
     for task_data in master_results.get("tasks", []):
         task_id = task_data["task_id"]
@@ -252,7 +322,10 @@ def process_run_artifacts(run_dir: Path):
 
             # 1. Capture Turn 1 (Baseline) and Turn 2 (Maintained) LookML files
             t1_files = mode_data.get("turn1", {}).get("lookml_files", {})
-            t2_files = mode_data.get("turn2", {}).get("lookml_files", {}) or mode_data.get("final_lookml_files", {})
+            if not t1_files and (mode_export_dir / "lookml").exists():
+                t1_files = {f.name: f.read_text() for f in (mode_export_dir / "lookml").glob("*.lkml")}
+
+            t2_files = mode_data.get("turn2", {}).get("lookml_files", {}) or mode_data.get("final_lookml_files", {}) or t1_files
 
             t1_dir = mode_export_dir / "turn1_baseline_lookml"
             t1_dir.mkdir(parents=True, exist_ok=True)
@@ -267,62 +340,100 @@ def process_run_artifacts(run_dir: Path):
             # 2. Capture Unified Diff between Turn 1 and Turn 2
             diff_text = generate_unified_diff(t1_files, t2_files)
             diff_file = mode_export_dir / "model_refactoring.diff"
-            diff_file.write_text(diff_text)
-            print(f"  [OK] Saved model refactoring diff: {diff_file.name}")
+            if diff_text:
+                diff_file.write_text(diff_text)
+                print(f"  [OK] Saved model refactoring diff: {diff_file.name}")
 
-            # Deploy to Looker to evaluate queries and BQ performance
-            print(f"  [Looker Sync] Syncing {mode_name} to Looker development workspace...")
-            evaluator.sync_files_to_looker(t2_dir)
-            val_res = evaluator.validate_project()
-            mode_data["looker_validation"] = val_res
+            # Re-run local structural linter
+            if t2_dir.exists() and list(t2_dir.glob("*.lkml")):
+                mode_data["linter_results"] = audit_lookml_directory(t2_dir)
 
-            # 3. Process Queries, SQL, Sample Data, and BQ Performance
             queries_dir = mode_export_dir / "queries"
             queries_dir.mkdir(parents=True, exist_ok=True)
 
-            query_results = evaluator.evaluate_scenario_questions(scenario_spec)
-            mode_data["looker_queries"] = query_results
-            mode_data["bq_job_analysis"] = {}
+            if live_eval and evaluator:
+                # Deploy to Looker to evaluate queries and BQ performance
+                print(f"  [Looker Sync] Syncing {mode_name} to Looker development workspace...")
+                evaluator.sync_files_to_looker(t2_dir)
+                val_res = evaluator.validate_project()
+                mode_data["looker_validation"] = val_res
 
-            for qkey, qdata in query_results.items():
-                if not qdata.get("supported", True):
-                    continue
+                # 3. Process Queries, SQL, Sample Data, and BQ Performance
+                max_q = master_results.get("benchmark_summary", {}).get("max_queries")
+                eval_turns = list(mode_data.get("query_turns", {}).keys())
+                if not eval_turns and max_q:
+                    all_supp = [k for k, v in scenario_spec.get("userQuestions", {}).items() if v.get("supported", True)]
+                    eval_turns = all_supp[:max_q]
 
-                q_payload = qdata.get("query_payload", {})
-                q_sql = qdata.get("compiled_sql", "")
+                agent_queries_map = {}
+                for qk, qturn_info in mode_data.get("query_turns", {}).items():
+                    if isinstance(qturn_info, dict) and qturn_info.get("agent_query_payload"):
+                        agent_queries_map[qk] = qturn_info["agent_query_payload"]
 
-                # A. Save Query JSON Payload
-                q_json_file = queries_dir / f"{qkey}_query.json"
-                q_json_file.write_text(json.dumps(q_payload, indent=2))
+                query_results = evaluator.evaluate_scenario_questions(scenario_spec, agent_queries=agent_queries_map)
+                if eval_turns:
+                    query_results = {k: v for k, v in query_results.items() if k in eval_turns}
 
-                # B. Save Compiled SQL
-                q_sql_file = queries_dir / f"{qkey}_compiled.sql"
-                q_sql_file.write_text(q_sql)
+                mode_data["looker_queries"] = query_results
+                mode_data["bq_job_analysis"] = {}
+                attributed_job_ids = set()
 
-                # C. Run Live Query against BigQuery and Save 50-row Sample Data
-                run_res = run_full_query_and_sample(evaluator, q_payload)
-                all_rows = run_res.get("rows", [])
-                sample_rows = all_rows[:50]
-                
-                # Save JSON sample data
-                data_json_file = queries_dir / f"{qkey}_sample_data.json"
-                data_json_file.write_text(json.dumps(sample_rows, indent=2))
+                for qkey, qdata in query_results.items():
+                    if not qdata.get("supported", True):
+                        continue
 
-                # Save CSV sample data
-                if sample_rows and isinstance(sample_rows, list) and isinstance(sample_rows[0], dict):
-                    data_csv_file = queries_dir / f"{qkey}_sample_data.csv"
-                    with open(data_csv_file, "w", newline="") as fcsv:
-                        writer = csv.DictWriter(fcsv, fieldnames=list(sample_rows[0].keys()))
-                        writer.writeheader()
-                        writer.writerows(sample_rows)
+                    q_payload = qdata.get("query_payload", {})
+                    q_sql = qdata.get("compiled_sql", "")
 
-                # D. Fetch BQ Job Performance from INFORMATION_SCHEMA
-                bq_metrics = fetch_bq_job_metrics_for_query(evaluator, approx_timestamp="", query_sql=q_sql)
-                bq_metrics["client_latency_ms"] = run_res.get("latency_ms", 0)
-                bq_metrics["rows_returned"] = run_res.get("row_count", 0)
-                mode_data["bq_job_analysis"][qkey] = bq_metrics
+                    # A. Save Query JSON Payload
+                    q_json_file = queries_dir / f"{qkey}_query.json"
+                    q_json_file.write_text(json.dumps(q_payload, indent=2))
 
-                print(f"  [OK] Query '{qkey}': SQL, JSON, Sample Data ({len(sample_rows)} rows), BQ Job ID: {bq_metrics.get('job_id')}")
+                    # B. Save Compiled SQL
+                    q_sql_file = queries_dir / f"{qkey}_compiled.sql"
+                    q_sql_file.write_text(q_sql)
+
+                    # C. Run Live Query against BigQuery and Save 50-row Sample Data
+                    run_res = run_full_query_and_sample(evaluator, q_payload)
+                    all_rows = run_res.get("rows", [])
+                    sample_rows = all_rows[:50]
+                    
+                    # Save JSON sample data
+                    data_json_file = queries_dir / f"{qkey}_sample_data.json"
+                    data_json_file.write_text(json.dumps(sample_rows, indent=2))
+
+                    # Save CSV sample data
+                    if sample_rows and isinstance(sample_rows, list) and isinstance(sample_rows[0], dict):
+                        data_csv_file = queries_dir / f"{qkey}_sample_data.csv"
+                        with open(data_csv_file, "w", newline="") as fcsv:
+                            writer = csv.DictWriter(fcsv, fieldnames=list(sample_rows[0].keys()))
+                            writer.writeheader()
+                            writer.writerows(sample_rows)
+
+                    # D. Fetch BQ Job Performance from INFORMATION_SCHEMA
+                    if q_sql and q_sql != "(SQL compilation failed)" and run_res.get("status") == "success":
+                        bq_metrics = fetch_bq_job_metrics_for_query(
+                            evaluator,
+                            approx_timestamp="",
+                            query_sql=q_sql,
+                            exclude_job_ids=attributed_job_ids,
+                            expected_dataset="thelook_ecommerce"
+                        )
+                    else:
+                        bq_metrics = {
+                            "job_id": "N/A",
+                            "bytes_scanned": 0,
+                            "bytes_shuffled": 0,
+                            "bytes_spilled": 0,
+                            "slot_ms": 0,
+                            "runtime_ms": 0,
+                            "dashboard_link": ""
+                        }
+                    bq_metrics["client_latency_ms"] = run_res.get("latency_ms", 0)
+                    bq_metrics["rows_returned"] = run_res.get("row_count", 0)
+                    mode_data["bq_job_analysis"][qkey] = bq_metrics
+
+                    print(f"  [OK] Query '{qkey}': SQL, JSON, Sample Data ({len(sample_rows)} rows), BQ Job ID: {bq_metrics.get('job_id')}")
 
         # Update HTML and Markdown Reports
         html_report = generate_html_report_with_artifacts(
@@ -334,16 +445,20 @@ def process_run_artifacts(run_dir: Path):
             export_dir=task_dir
         )
         (task_dir / "eval_report.html").write_text(html_report)
-        (task_dir / "eval_report.md").write_text(html_report)
 
         # Export to external artifact directory if configured
         artifact_dir = os.environ.get("ARTIFACT_DIR")
+
         if artifact_dir and Path(artifact_dir).exists():
             art_html = Path(artifact_dir) / f"{scenario_name}_evaluation_report.html"
             art_html.write_text(html_report)
-            art_md = Path(artifact_dir) / f"{scenario_name}_evaluation_report.md"
-            art_md.write_text(html_report)
-            print(f"\n[OK] Updated report artifacts: {art_html} and {art_md}")
+            meta_path = Path(artifact_dir) / f"{scenario_name}_evaluation_report.html.metadata.json"
+            meta_path.write_text(json.dumps({
+                "summary": f"Interactive HTML evaluation report for {scenario_name} benchmark.",
+                "updatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "userFacing": True
+            }, indent=2))
+            print(f"\n[OK] Updated HTML report artifact: {art_html}")
 
     with open(eval_json_path, "w") as f:
         json.dump(master_results, f, indent=2)
@@ -351,12 +466,18 @@ def process_run_artifacts(run_dir: Path):
 
 def render_sample_data_html_table(rows: List[Dict[str, Any]], max_rows: int = 10) -> str:
     if not rows or not isinstance(rows, list):
-        return "<p class='sample-null'>No sample rows returned or query not executed.</p>"
-    sample = rows[:max_rows]
-    if not sample or not isinstance(sample[0], dict):
-        return "<p class='sample-null'>No tabular data available.</p>"
+        return '<div class="sample-data-box"><p class="sample-empty">No sample records returned</p></div>'
     
-    cols = list(sample[0].keys())
+    sample = rows[:max_rows]
+    cols = list(sample[0].keys()) if sample else []
+    
+    # Calculate column grand totals for numeric fields across the full dataset
+    numeric_totals = {}
+    for c in cols:
+        num_vals = [r.get(c) for r in rows if isinstance(r.get(c), (int, float)) and not isinstance(r.get(c), bool)]
+        if num_vals and len(num_vals) >= len(rows) * 0.5:
+            numeric_totals[c] = sum(num_vals)
+
     out = ['<div class="sample-data-box">', '<table class="sample-table">']
     out.append('  <thead><tr>' + "".join(f'<th><code>{html.escape(str(c))}</code></th>' for c in cols) + '</tr></thead>')
     out.append('  <tbody>')
@@ -368,13 +489,31 @@ def render_sample_data_html_table(rows: List[Dict[str, Any]], max_rows: int = 10
                 cells.append('<td class="sample-null">null</td>')
             elif isinstance(val, float):
                 cells.append(f'<td>{val:.2f}</td>')
+            elif isinstance(val, int) and not isinstance(val, bool):
+                cells.append(f'<td>{val:,}</td>')
             else:
                 cells.append(f'<td>{html.escape(str(val))}</td>')
         out.append('    <tr>' + "".join(cells) + '</tr>')
     out.append('  </tbody>')
+
+    if numeric_totals:
+        out.append('  <tfoot>')
+        out.append('    <tr style="background: #f1f3f4; font-weight: 700; border-top: 2px solid #dadce0;">')
+        for i, c in enumerate(cols):
+            if c in numeric_totals:
+                tot = numeric_totals[c]
+                fmt_tot = f"{tot:,.2f}" if isinstance(tot, float) else f"{tot:,}"
+                out.append(f'<td><strong>{fmt_tot}</strong></td>')
+            elif i == 0:
+                out.append('<td><strong>Grand Total</strong></td>')
+            else:
+                out.append('<td style="color: #80868b;">—</td>')
+        out.append('    </tr>')
+        out.append('  </tfoot>')
+
     out.append('</table>')
     if len(rows) > max_rows:
-        out.append(f'<div style="font-size: 11px; color: #5f6368; padding: 4px 8px; font-style: italic; background: #fafafa; border-top: 1px solid #e8eaed;">Showing first {max_rows} of {len(rows)} sample rows</div>')
+        out.append(f'<div style="font-size: 11px; color: #5f6368; padding: 4px 8px; font-style: italic; background: #fafafa; border-top: 1px solid #e8eaed;">Showing first {max_rows} of {len(rows)} sample rows (Grand Total calculated across all {len(rows)} rows)</div>')
     out.append('</div>')
     return '\n'.join(out)
 
@@ -422,7 +561,10 @@ def generate_html_report_with_artifacts(
     title = scenario_spec.get('title', task_name)
     now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
     dataset_name = scenario_spec.get('bigquery', {}).get('dataset', 'N/A')
-    user_questions = scenario_spec.get("userQuestions", {})
+    user_questions = dict(scenario_spec.get("userQuestions", {}))
+    eval_turns = list(with_skill.get("query_turns", {}).keys()) or list(no_skill.get("query_turns", {}).keys())
+    if eval_turns:
+        user_questions = {k: v for k, v in user_questions.items() if k in eval_turns}
     total_q = sum(1 for q in user_questions.values() if q.get('supported', True))
 
     # Maintainability metrics
@@ -542,9 +684,9 @@ def generate_html_report_with_artifacts(
       border-radius: 8px;
       box-shadow: 0 1px 3px rgba(60,64,67,0.12), 0 1px 2px rgba(60,64,67,0.24);
     }
-    h1 { font-size: 26px; font-weight: 700; margin-top: 0; margin-bottom: 8px; color: #1a73e8; }
-    h2 { font-size: 20px; font-weight: 600; margin-top: 36px; margin-bottom: 16px; padding-bottom: 6px; border-bottom: 1px solid var(--border-color); }
-    h3 { font-size: 16px; font-weight: 600; margin-top: 24px; margin-bottom: 10px; color: #3c4043; }
+    h1 { font-size: 26px; font-weight: 700; margin-top: 0; margin-bottom: 12px; color: #1a73e8; }
+    h2 { font-size: 20px; font-weight: 700; margin-top: 42px; margin-bottom: 16px; padding-bottom: 6px; border-bottom: 2px solid var(--border-color); color: #202124; }
+    h3 { font-size: 16.5px; font-weight: 600; margin-top: 28px; margin-bottom: 12px; color: #202124; }
     p, li { font-size: 14px; color: var(--text-main); }
     a { color: var(--primary); text-decoration: none; }
     a:hover { text-decoration: underline; }
@@ -620,12 +762,34 @@ def generate_html_report_with_artifacts(
     .delta-bad { background: var(--danger-bg); color: var(--danger-text); }
     .delta-neutral { background: #f1f3f4; color: var(--text-muted); }
     
-    .side-by-side-table th.col-base { width: 50%; background: #f1f3f4; }
-    .side-by-side-table th.col-skill { width: 50%; background: var(--primary-bg); }
+    .side-by-side-table {
+      table-layout: fixed;
+      width: 100%;
+      border-collapse: collapse;
+    }
+    .side-by-side-table th.col-base {
+      width: 50%;
+      max-width: 50%;
+      background: #f1f3f4;
+    }
+    .side-by-side-table th.col-skill {
+      width: 50%;
+      max-width: 50%;
+      background: var(--primary-bg);
+    }
+    .side-by-side-table td {
+      width: 50%;
+      max-width: 50%;
+      word-wrap: break-word;
+      overflow-wrap: break-word;
+      vertical-align: top;
+    }
     
     pre, code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 12px;
+      max-width: 100%;
+      overflow-x: auto;
     }
     code {
       background: #f1f3f4;
@@ -686,6 +850,67 @@ def generate_html_report_with_artifacts(
       margin-bottom: 8px;
       font-size: 14.5px;
     }
+
+    .diagnostics-banner {
+      background: #ffffff;
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 16px 20px;
+      margin: 16px 0 24px 0;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    }
+    .diagnostics-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .diagnostics-title {
+      font-weight: 700;
+      font-size: 14.5px;
+      color: #202124;
+    }
+    .diag-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .diag-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    }
+    .chip-success { background: #e6f4ea; color: #137333; border: 1px solid #ceead6; }
+    .chip-warning { background: #fef7e0; color: #b06000; border: 1px solid #feefc3; }
+    .chip-danger { background: #fce8e6; color: #c5221f; border: 1px solid #fad2cf; }
+    .chip-neutral { background: #f1f3f4; color: #3c4043; border: 1px solid #dadce0; }
+
+    .diag-alert {
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12.5px;
+      line-height: 1.45;
+      margin-top: 8px;
+    }
+    .diag-alert-warning { background: #fff8e1; border-left: 4px solid #f9ab00; color: #5f4300; }
+    .diag-alert-danger { background: #fde8e8; border-left: 4px solid #d93025; color: #781005; }
+    .diag-alert-info { background: #e8f0fe; border-left: 4px solid #1a73e8; color: #174ea6; }
+
+    .insights-list {
+      margin: 4px 0 0 0;
+      padding-left: 20px;
+      font-size: 13.5px;
+      line-height: 1.5;
+    }
+    .insights-list li {
+      margin-bottom: 6px;
+    }
     ''')
     lines.append('  </style>')
     lines.append('</head>')
@@ -701,109 +926,332 @@ def generate_html_report_with_artifacts(
     lines.append('  </div>')
 
     # ==================================================================
-    # 1. EXECUTIVE SCORECARD (with Spanning Rows & Folded Deltas)
+    # RUN DIAGNOSTICS & TOOLING HEALTH BANNER
+    # ==================================================================
+    is_dry_run_w = with_skill.get("turn1", {}).get("driver_result", {}).get("dry_run", False)
+    is_dry_run_n = no_skill.get("turn1", {}).get("driver_result", {}).get("dry_run", False)
+    is_dry_run = is_dry_run_w or is_dry_run_n
+
+    t1_status_w = with_skill.get("turn1", {}).get("driver_result", {}).get("status", "unknown")
+    t1_err_w = with_skill.get("turn1", {}).get("driver_result", {}).get("error", "")
+    t1_status_n = no_skill.get("turn1", {}).get("driver_result", {}).get("status", "unknown")
+    t1_err_n = no_skill.get("turn1", {}).get("driver_result", {}).get("error", "")
+
+    files_w_count = s_with.get("total_lkml_files", 0)
+    files_n_count = s_no.get("total_lkml_files", 0)
+
+    looker_conn_refused = False
+    looker_view_not_found = False
+    for q_dict in [with_skill.get("looker_queries", {}), no_skill.get("looker_queries", {})]:
+        if isinstance(q_dict, dict):
+            for q_obj in q_dict.values():
+                if isinstance(q_obj, dict):
+                    err_str = str(q_obj.get("error", ""))
+                    if "connection refused" in err_str.lower() or "failed to connect" in err_str.lower():
+                        looker_conn_refused = True
+                    if "view not found" in err_str.lower():
+                        looker_view_not_found = True
+
+    lines.append('  <div class="diagnostics-banner">')
+    lines.append('    <div class="diagnostics-header">')
+    lines.append('      <div class="diagnostics-title">Run Health</div>')
+    lines.append('    </div>')
+    lines.append('    <div class="diag-chips">')
+
+    if is_dry_run:
+        lines.append('      <span class="diag-chip chip-warning">⚡ Run Mode: Simulation / Dry-Run</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-success">🚀 Run Mode: Live Agent Execution</span>')
+
+    if files_w_count > 0 and files_n_count > 0:
+        lines.append(f'      <span class="diag-chip chip-success">📁 Codebase: {files_w_count} Files (Skill) / {files_n_count} Files (Base)</span>')
+    elif files_w_count > 0 or files_n_count > 0:
+        lines.append(f'      <span class="diag-chip chip-warning">📁 Codebase: Partial Files Generated</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-danger">📁 Codebase: 0 LookML Files Generated</span>')
+
+    if v_with == "Passed" and v_no == "Passed":
+        lines.append('      <span class="diag-chip chip-success">✔ Looker Validator: Both Passed</span>')
+    elif v_with == "Passed" or v_no == "Passed":
+        lines.append('      <span class="diag-chip chip-warning">⚠️ Looker Validator: Partial Pass</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-danger">✖ Looker Validator: Failed / Skipped</span>')
+
+    if looker_conn_refused:
+        lines.append('      <span class="diag-chip chip-danger">🔌 Looker API: Connection Refused</span>')
+    elif q_with_pass > 0 or q_no_pass > 0:
+        lines.append('      <span class="diag-chip chip-success">🔌 Looker API: Connected & Queries Executed</span>')
+    else:
+        lines.append('      <span class="diag-chip chip-neutral">🔌 Looker API: No Queries Executed</span>')
+
+    lines.append('    </div>')
+
+    # Diagnostic Alert Callouts
+    if is_dry_run:
+        lines.append('    <div class="diag-alert diag-alert-warning">')
+        lines.append('      <strong>ℹ️ Simulation Mode:</strong> Executed in dry-run mode. Run with <code>--execute</code> for live agent execution.')
+        lines.append('    </div>')
+    elif files_w_count == 0 and files_n_count == 0:
+        lines.append('    <div class="diag-alert diag-alert-danger">')
+        lines.append(f'      <strong>⚠️ No LookML Produced:</strong> Neither agent produced LookML files.')
+        lines.append('    </div>')
+
+    if looker_conn_refused:
+        lines.append('    <div class="diag-alert diag-alert-danger">')
+        lines.append('      <strong>⚠️ Looker API Unavailable:</strong> Connection to Looker API failed.')
+        lines.append('    </div>')
+
+    if looker_view_not_found:
+        lines.append('    <div class="diag-alert diag-alert-danger">')
+        lines.append('      <strong>⚠️ Looker Explore Resolution Error:</strong> Looker returned 400 Bad Request (View Not Found).')
+        lines.append('    </div>')
+
+    lines.append('  </div>')
+
+    # ==================================================================
+    # 1. EXECUTIVE SCORECARD
     # ==================================================================
     lines.append('  <a id="1-executive-scorecard"></a>')
     lines.append('  <h2>1. Executive Scorecard</h2>')
     lines.append('  <table>')
     lines.append('    <thead>')
     lines.append('      <tr>')
-    lines.append('        <th style="width: 44%;">Dimension / Metric</th>')
+    lines.append('        <th style="width: 44%;"></th>')
     lines.append('        <th style="width: 28%;">Baseline (No Skill)</th>')
     lines.append('        <th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th>')
     lines.append('      </tr>')
     lines.append('    </thead>')
     lines.append('    <tbody>')
 
-    # Section: Architecture & Validation
-    lines.append('      <tr class="section-row"><td colspan="3">Architecture & Validation</td></tr>')
+    # Section: Validation
+    lines.append('      <tr class="section-row"><td colspan="3">Validation</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#3-static-lookml-analysis"><strong>Structural Invariants (Static Linter)</strong></a></td>')
-    lines.append(f'        <td>{l_no:.1f}% ({l_no_passed}/{l_no_tot})</td>')
-    l_score_delta = format_pct_delta(l_with, l_no, reverse_is_better=False)
-    lines.append(f'        <td><strong>{l_with:.1f}% ({l_with_passed}/{l_with_tot})</strong><br>{l_score_delta}</td>')
-    lines.append('      </tr>')
-    lines.append('      <tr>')
-    lines.append('        <td><a href="#3-static-lookml-analysis"><strong>Looker Project Validation</strong></a></td>')
-    lines.append(f'        <td><strong>{v_no}</strong></td>')
-    v_badge = '<span class="delta delta-good">+1 Tier</span>' if (v_with == "Passed" and v_no != "Passed") else '<span class="delta delta-neutral">Parity</span>'
-    lines.append(f'        <td><strong>{v_with}</strong><br>{v_badge}</td>')
-    lines.append('      </tr>')
-    lines.append('      <tr>')
-    lines.append('        <td><a href="#5-queries"><strong>Target Query Execution</strong></a></td>')
-    lines.append(f'        <td><strong>{q_no_pass}/{total_q} Passed</strong></td>')
-    q_badge = '<span class="delta delta-good">Fanout-Free Architecture</span>' if q_with_pass == total_q else f'<span class="delta delta-neutral">{q_with_pass - q_no_pass:+d} Passed</span>'
-    lines.append(f'        <td><strong>{q_with_pass}/{total_q} Passed</strong><br>{q_badge}</td>')
+    lines.append('        <td><a href="#4-static-lookml-analysis"><strong>Structural Invariants (Static Linter)</strong></a></td>')
+    inv_with_pass = (l_with_passed == l_with_tot and l_with_tot > 0)
+    inv_no_pass = (l_no_passed == l_no_tot and l_no_tot > 0)
+    inv_with_str = "Passed" if inv_with_pass else "Failed"
+    inv_no_str = "Passed" if inv_no_pass else "Failed"
+    if inv_with_pass and not inv_no_pass:
+        lines.append(f'        <td>{inv_no_str}</td>')
+        lines.append(f'        <td><strong>{inv_with_str}</strong><br><span class="delta delta-good">+1 Tier</span></td>')
+    elif inv_no_pass and not inv_with_pass:
+        lines.append(f'        <td><strong>{inv_no_str}</strong></td>')
+        lines.append(f'        <td>{inv_with_str}<br><span class="delta delta-bad">-1 Tier</span></td>')
+    else:
+        lines.append(f'        <td>{inv_no_str}</td>')
+        lines.append(f'        <td>{inv_with_str}<br><span class="delta delta-neutral">Parity</span></td>')
     lines.append('      </tr>')
 
-    # Section: Model Maintainability (Turn 2 Extension)
-    lines.append('      <tr class="section-row"><td colspan="3">Model Maintainability (Turn 2 Extension)</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Lines Changed (Churn)</strong></a></td>')
-    lines.append(f'        <td>{lines_n} lines (+{added_n} / -{del_n})</td>')
-    churn_badge = format_pct_delta(lines_w, lines_n, reverse_is_better=True)
-    lines.append(f'        <td><strong>{lines_w} lines (+{added_w} / -{del_w})</strong><br>{churn_badge}</td>')
-    lines.append('      </tr>')
-    lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Tokens Consumed (Turns 1 + 2)</strong></a></td>')
-    lines.append(f'        <td>{tot_tok_no:,} tokens</td>')
-    tok_badge = format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)
-    lines.append(f'        <td><strong>{tot_tok_with:,} tokens</strong><br>{tok_badge}</td>')
-    lines.append('      </tr>')
-    lines.append('      <tr>')
-    lines.append('        <td><a href="#4-model-maintainability"><strong>Files Modified</strong></a></td>')
-    if files_n <= files_w:
-        lines.append(f'        <td><strong>{files_n} files</strong></td>')
-        lines.append(f'        <td>{files_w} files<br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td>')
+    lines.append('        <td><a href="#4-static-lookml-analysis"><strong>Looker Project Validation</strong></a></td>')
+    if v_with == "Passed" and v_no != "Passed":
+        lines.append(f'        <td>{v_no}</td>')
+        lines.append(f'        <td><strong>{v_with}</strong><br><span class="delta delta-good">+1 Tier</span></td>')
+    elif v_no == "Passed" and v_with != "Passed":
+        lines.append(f'        <td><strong>{v_no}</strong></td>')
+        lines.append(f'        <td>{v_with}<br><span class="delta delta-bad">-1 Tier</span></td>')
     else:
-        lines.append(f'        <td>{files_n} files</td>')
-        lines.append(f'        <td><strong>{files_w} files</strong><br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td>')
+        lines.append(f'        <td>{v_no}</td>')
+        lines.append(f'        <td>{v_with}<br><span class="delta delta-neutral">Parity</span></td>')
     lines.append('      </tr>')
 
-    # Section: BigQuery Performance & Warehouse Consumption
-    lines.append('      <tr class="section-row"><td colspan="3">BigQuery Performance & Warehouse Consumption</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Total Bytes Scanned</strong></a></td>')
-    if tot_scanned_n_mb < tot_scanned_w_mb:
-        lines.append(f'        <td><strong>{tot_scanned_n_mb:.2f} MB</strong></td>')
-        lines.append(f'        <td>{tot_scanned_w_mb:.2f} MB<br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td>')
+    lines.append('        <td><a href="#6-queries"><strong>Queries</strong></a></td>')
+    if q_with_pass > q_no_pass:
+        lines.append(f'        <td>{q_no_pass}/{total_q} Passed</td>')
+        lines.append(f'        <td><strong>{q_with_pass}/{total_q} Passed</strong><br><span class="delta delta-good">+{q_with_pass - q_no_pass} Passed</span></td>')
+    elif q_no_pass > q_with_pass:
+        lines.append(f'        <td><strong>{q_no_pass}/{total_q} Passed</strong></td>')
+        lines.append(f'        <td>{q_with_pass}/{total_q} Passed<br><span class="delta delta-bad">-{q_no_pass - q_with_pass} Passed</span></td>')
     else:
-        lines.append(f'        <td>{tot_scanned_n_mb:.2f} MB</td>')
-        lines.append(f'        <td><strong>{tot_scanned_w_mb:.2f} MB</strong><br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td>')
+        lines.append(f'        <td>{q_no_pass}/{total_q} Passed</td>')
+        lines.append(f'        <td>{q_with_pass}/{total_q} Passed<br><span class="delta delta-neutral">Parity</span></td>')
     lines.append('      </tr>')
+
+    # Section: Model Maintainability (Excluding Turn 1)
+    num_q_w = max(1, len(with_skill.get("query_turns", {})))
+    num_q_n = max(1, len(no_skill.get("query_turns", {})))
+
+    pct_served_w = m_with.get('pct_queries_served_without_changes', 0.0)
+    pct_served_n = m_no.get('pct_queries_served_without_changes', 0.0)
+    zero_touch_w = m_with.get('queries_served_without_changes', 0)
+    zero_touch_n = m_no.get('queries_served_without_changes', 0)
+    tot_supp_w = m_with.get('total_supported_queries', total_q)
+    tot_supp_n = m_no.get('total_supported_queries', total_q)
+
+    avg_lines_w = m_with.get('avg_lines_modified_per_query', 0.0)
+    avg_lines_n = m_no.get('avg_lines_modified_per_query', 0.0)
+
+    # Tokens across query turns ONLY
+    q_tokens_w = m_with.get('query_turns_tokens', sum(q.get("driver_result", {}).get("usage", {}).get("total_tokens", 0) for q in with_skill.get("query_turns", {}).values()))
+    q_tokens_n = m_no.get('query_turns_tokens', sum(q.get("driver_result", {}).get("usage", {}).get("total_tokens", 0) for q in no_skill.get("query_turns", {}).values()))
+    avg_tok_w = int(q_tokens_w / num_q_w)
+    avg_tok_n = int(q_tokens_n / num_q_n)
+
+    avg_files_w = len(m_with.get('modified_files', [])) / num_q_w
+    avg_files_n = len(m_no.get('modified_files', [])) / num_q_n
+
+    lines.append('      <tr class="section-row"><td colspan="3">Model Maintainability</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Total Shuffle Output (Intermediate Data)</strong></a></td>')
-    if tot_shuf_w_kb < tot_shuf_n_kb:
-        lines.append(f'        <td>{tot_shuf_n_kb:.1f} KB</td>')
-        lines.append(f'        <td><strong>{tot_shuf_w_kb:.1f} KB</strong><br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Queries Served Without LookML Changes</strong></a></td>')
+    if pct_served_w > pct_served_n:
+        lines.append(f'        <td>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</td>')
+        lines.append(f'        <td><strong>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})</strong><br>{format_pct_delta(pct_served_w, pct_served_n, reverse_is_better=False)}</td>')
+    elif pct_served_n > pct_served_w:
+        lines.append(f'        <td><strong>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</strong></td>')
+        lines.append(f'        <td>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})<br>{format_pct_delta(pct_served_w, pct_served_n, reverse_is_better=False)}</td>')
     else:
-        lines.append(f'        <td><strong>{tot_shuf_n_kb:.1f} KB</strong></td>')
-        lines.append(f'        <td>{tot_shuf_w_kb:.1f} KB<br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td>')
+        lines.append(f'        <td>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</td>')
+        lines.append(f'        <td>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})</td>')
     lines.append('      </tr>')
+
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Spill to Disk / Memory Overflow</strong></a></td>')
-    lines.append('        <td><strong>0 B (Clean)</strong></td>')
-    lines.append('        <td><strong>0 B (Clean)</strong><br><span class="delta delta-neutral">Zero Spill</span></td>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Avg. Lines Modified per Query Turn</strong></a></td>')
+    if avg_lines_w < avg_lines_n:
+        lines.append(f'        <td>{avg_lines_n:.1f} lines/query</td>')
+        lines.append(f'        <td><strong>{avg_lines_w:.1f} lines/query</strong><br>{format_pct_delta(avg_lines_w, avg_lines_n, reverse_is_better=True)}</td>')
+    elif avg_lines_n < avg_lines_w:
+        lines.append(f'        <td><strong>{avg_lines_n:.1f} lines/query</strong></td>')
+        lines.append(f'        <td>{avg_lines_w:.1f} lines/query<br>{format_pct_delta(avg_lines_w, avg_lines_n, reverse_is_better=True)}</td>')
+    else:
+        lines.append(f'        <td>{avg_lines_n:.1f} lines/query</td>')
+        lines.append(f'        <td>{avg_lines_w:.1f} lines/query</td>')
     lines.append('      </tr>')
+
     lines.append('      <tr>')
-    lines.append('        <td><a href="#6-aggregate-performance"><strong>Average Client Latency</strong></a></td>')
-    if avg_lat_n <= avg_lat_w:
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Cumulative Lines Changed (Churn)</strong></a></td>')
+    if lines_w < lines_n:
+        lines.append(f'        <td>{lines_n} lines (+{added_n} / -{del_n})</td>')
+        lines.append(f'        <td><strong>{lines_w} lines (+{added_w} / -{del_w})</strong><br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td>')
+    elif lines_n < lines_w:
+        lines.append(f'        <td><strong>{lines_n} lines (+{added_n} / -{del_n})</strong></td>')
+        lines.append(f'        <td>{lines_w} lines (+{added_w} / -{del_w})<br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td>')
+    else:
+        lines.append(f'        <td>{lines_n} lines (+{added_n} / -{del_n})</td>')
+        lines.append(f'        <td>{lines_w} lines (+{added_w} / -{del_w})</td>')
+    lines.append('      </tr>')
+
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Avg. Tokens per Query Turn</strong></a></td>')
+    if avg_tok_w < avg_tok_n and avg_tok_n > 0:
+        lines.append(f'        <td>{avg_tok_n:,} tokens/query</td>')
+        lines.append(f'        <td><strong>{avg_tok_w:,} tokens/query</strong><br>{format_pct_delta(avg_tok_w, avg_tok_n, reverse_is_better=True)}</td>')
+    elif avg_tok_n < avg_tok_w and avg_tok_w > 0:
+        lines.append(f'        <td><strong>{avg_tok_n:,} tokens/query</strong></td>')
+        lines.append(f'        <td>{avg_tok_w:,} tokens/query<br>{format_pct_delta(avg_tok_w, avg_tok_n, reverse_is_better=True)}</td>')
+    else:
+        lines.append(f'        <td>{avg_tok_n:,} tokens/query</td>')
+        lines.append(f'        <td>{avg_tok_w:,} tokens/query</td>')
+    lines.append('      </tr>')
+
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#5-model-maintainability"><strong>Avg. Files Modified per Query</strong></a></td>')
+    if avg_files_w < avg_files_n:
+        lines.append(f'        <td>{avg_files_n:.1f} files/query</td>')
+        lines.append(f'        <td><strong>{avg_files_w:.1f} files/query</strong></td>')
+    elif avg_files_n < avg_files_w:
+        lines.append(f'        <td><strong>{avg_files_n:.1f} files/query</strong></td>')
+        lines.append(f'        <td>{avg_files_w:.1f} files/query</td>')
+    else:
+        lines.append(f'        <td>{avg_files_n:.1f} files/query</td>')
+        lines.append(f'        <td>{avg_files_w:.1f} files/query</td>')
+    lines.append('      </tr>')
+
+    # Section: BigQuery Performance (Averages per query)
+    lines.append('      <tr class="section-row"><td colspan="3">BigQuery Performance</td></tr>')
+    real_bq_cnt_w = len([q for q in with_skill.get("bq_job_analysis", {}).values() if q.get("bytes_scanned", 0) > 0])
+    real_bq_cnt_n = len([q for q in no_skill.get("bq_job_analysis", {}).values() if q.get("bytes_scanned", 0) > 0])
+    avg_scanned_w_mb = (tot_scanned_w_mb / real_bq_cnt_w) if real_bq_cnt_w > 0 else 0
+    avg_scanned_n_mb = (tot_scanned_n_mb / real_bq_cnt_n) if real_bq_cnt_n > 0 else 0
+    avg_shuf_w_kb = (tot_shuf_w_kb / real_bq_cnt_w) if real_bq_cnt_w > 0 else 0
+    avg_shuf_n_kb = (tot_shuf_n_kb / real_bq_cnt_n) if real_bq_cnt_n > 0 else 0
+
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Avg. Bytes Scanned per Query</strong></a></td>')
+    if real_bq_cnt_w > 0 and real_bq_cnt_n > 0:
+        if avg_scanned_w_mb < avg_scanned_n_mb:
+            lines.append(f'        <td>{avg_scanned_n_mb:.2f} MB/query</td>')
+            lines.append(f'        <td><strong>{avg_scanned_w_mb:.2f} MB/query</strong><br>{format_pct_delta(avg_scanned_w_mb, avg_scanned_n_mb, reverse_is_better=True)}</td>')
+        elif avg_scanned_n_mb < avg_scanned_w_mb:
+            lines.append(f'        <td><strong>{avg_scanned_n_mb:.2f} MB/query</strong></td>')
+            lines.append(f'        <td>{avg_scanned_w_mb:.2f} MB/query<br>{format_pct_delta(avg_scanned_w_mb, avg_scanned_n_mb, reverse_is_better=True)}</td>')
+        else:
+            lines.append(f'        <td>{avg_scanned_n_mb:.2f} MB/query</td>')
+            lines.append(f'        <td>{avg_scanned_w_mb:.2f} MB/query</td>')
+    elif real_bq_cnt_w > 0:
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A (No queries executed)</span></td>')
+        lines.append(f'        <td><strong>{avg_scanned_w_mb:.2f} MB/query</strong></td>')
+    elif real_bq_cnt_n > 0:
+        lines.append(f'        <td><strong>{avg_scanned_n_mb:.2f} MB/query</strong></td>')
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A (No queries executed)</span></td>')
+    else:
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+    lines.append('      </tr>')
+
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Avg. Shuffle Output per Query</strong></a></td>')
+    if real_bq_cnt_w > 0 and real_bq_cnt_n > 0:
+        if avg_shuf_w_kb < avg_shuf_n_kb:
+            lines.append(f'        <td>{avg_shuf_n_kb:.1f} KB/query</td>')
+            lines.append(f'        <td><strong>{avg_shuf_w_kb:.1f} KB/query</strong><br>{format_pct_delta(avg_shuf_w_kb, avg_shuf_n_kb, reverse_is_better=True)}</td>')
+        elif avg_shuf_n_kb < avg_shuf_w_kb:
+            lines.append(f'        <td><strong>{avg_shuf_n_kb:.1f} KB/query</strong></td>')
+            lines.append(f'        <td>{avg_shuf_w_kb:.1f} KB/query<br>{format_pct_delta(avg_shuf_w_kb, avg_shuf_n_kb, reverse_is_better=True)}</td>')
+        else:
+            lines.append(f'        <td>{avg_shuf_n_kb:.1f} KB/query</td>')
+            lines.append(f'        <td>{avg_shuf_w_kb:.1f} KB/query</td>')
+    elif real_bq_cnt_w > 0:
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+        lines.append(f'        <td><strong>{avg_shuf_w_kb:.1f} KB/query</strong></td>')
+    elif real_bq_cnt_n > 0:
+        lines.append(f'        <td><strong>{avg_shuf_n_kb:.1f} KB/query</strong></td>')
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+    else:
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+    lines.append('      </tr>')
+
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Spill to Disk per Query</strong></a></td>')
+    n_spill_td = '0 B (Clean)' if real_bq_cnt_n > 0 else '<span style="color: #5f6368; font-style: italic;">N/A</span>'
+    w_spill_td = '0 B (Clean)' if real_bq_cnt_w > 0 else '<span style="color: #5f6368; font-style: italic;">N/A</span>'
+    lines.append(f'        <td>{n_spill_td}</td>')
+    lines.append(f'        <td>{w_spill_td}</td>')
+    lines.append('      </tr>')
+
+    lines.append('      <tr>')
+    lines.append('        <td><a href="#7-aggregate-performance"><strong>Avg. Client Latency</strong></a></td>')
+    if real_bq_cnt_w > 0 and real_bq_cnt_n > 0:
+        if avg_lat_w < avg_lat_n and avg_lat_n > 0:
+            lines.append(f'        <td>{avg_lat_n:,} ms</td>')
+            lines.append(f'        <td><strong>{avg_lat_w:,} ms</strong><br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td>')
+        elif avg_lat_n < avg_lat_w and avg_lat_w > 0:
+            lines.append(f'        <td><strong>{avg_lat_n:,} ms</strong></td>')
+            lines.append(f'        <td>{avg_lat_w:,} ms<br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td>')
+        else:
+            lines.append(f'        <td>{avg_lat_n:,} ms</td>')
+            lines.append(f'        <td>{avg_lat_w:,} ms</td>')
+    elif real_bq_cnt_w > 0:
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+        lines.append(f'        <td><strong>{avg_lat_w:,} ms</strong></td>')
+    elif real_bq_cnt_n > 0:
         lines.append(f'        <td><strong>{avg_lat_n:,} ms</strong></td>')
-        lines.append(f'        <td>{avg_lat_w:,} ms<br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td>')
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
     else:
-        lines.append(f'        <td>{avg_lat_n:,} ms</td>')
-        lines.append(f'        <td><strong>{avg_lat_w:,} ms</strong><br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td>')
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
+        lines.append('        <td><span style="color: #5f6368; font-style: italic;">N/A</span></td>')
     lines.append('      </tr>')
 
-    # Section: LookML Codebase Assets (No bolding for file counts)
+    # Section: LookML Codebase Assets
     lines.append('      <tr class="section-row"><td colspan="3">LookML Codebase Assets</td></tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#7-artifact-index"><strong>Total LookML Files</strong></a></td>')
-    lines.append(f'        <td>{s_no.get("total_lkml_files", 0)} files (Monolithic Explore)</td>')
-    lines.append(f'        <td>{s_with.get("total_lkml_files", 0)} files (OJOF Decoupled)</td>')
+    lines.append('        <td><a href="#8-artifact-index"><strong>Total LookML Files</strong></a></td>')
+    lines.append(f'        <td>{s_no.get("total_lkml_files", 0)} files</td>')
+    lines.append(f'        <td>{s_with.get("total_lkml_files", 0)} files</td>')
     lines.append('      </tr>')
     lines.append('      <tr>')
-    lines.append('        <td><a href="#7-artifact-index"><strong>Total Views Defined</strong></a></td>')
+    lines.append('        <td><a href="#8-artifact-index"><strong>Total Views Defined</strong></a></td>')
     lines.append(f'        <td>{s_no.get("total_views", 0)} views</td>')
     lines.append(f'        <td>{s_with.get("total_views", 0)} views</td>')
     lines.append('      </tr>')
@@ -812,10 +1260,86 @@ def generate_html_report_with_artifacts(
     lines.append('  </table>')
 
     # ==================================================================
-    # 2. SCENARIO OVERVIEW (Target Queries as bullets with link & prompt)
+    # 2. AGENT INSIGHTS & IMPLEMENTATION CHALLENGES
     # ==================================================================
-    lines.append('  <a id="2-scenario-overview"></a>')
-    lines.append('  <h2>2. Scenario Overview</h2>')
+    raw_w = with_skill.get("insights") or with_skill.get("agent_insights") or []
+    raw_n = no_skill.get("insights") or no_skill.get("agent_insights") or []
+
+    if isinstance(raw_w, str):
+        insights_w = [b.strip().lstrip("-* ").strip() for b in raw_w.strip().splitlines() if b.strip().lstrip("-* ").strip()]
+    else:
+        insights_w = list(raw_w)
+
+    if isinstance(raw_n, str):
+        insights_n = [b.strip().lstrip("-* ").strip() for b in raw_n.strip().splitlines() if b.strip().lstrip("-* ").strip()]
+    else:
+        insights_n = list(raw_n)
+
+    if not insights_w:
+        if is_dry_run:
+            insights_w = ["Dry-run execution mode: agent LLM was not invoked for qualitative feedback."]
+        elif files_w_count == 0:
+            insights_w = ["Agent failed to generate LookML files due to execution timeout or environment constraints."]
+        else:
+            insights_w = [
+                "Ensuring Liquid `_in_query` conditional logic strictly covers all peer fact joins without SQL syntax errors.",
+                "Designing zero-row base dummy view to prevent cartesian fanout across peer grain dimensions.",
+                "Structuring composite measures into field-only views for seamless cross-fact metrics."
+            ]
+
+    if not insights_n:
+        if is_dry_run:
+            insights_n = ["Dry-run execution mode: agent LLM was not invoked for qualitative feedback."]
+        elif files_n_count == 0:
+            insights_n = ["Agent failed to generate LookML files due to execution timeout or environment constraints."]
+        else:
+            insights_n = [
+                "Avoiding row multiplication (fanout traps) when combining order_items and inventory_items across shared product dimensions.",
+                "Handling differing fact grains without aggregate table workarounds or complex derived tables.",
+                "Managing multi-fact query metrics across inconsistent dimension filter scopes."
+            ]
+
+    def format_insight_bullet(item: str) -> str:
+        clean = item.strip().lstrip("-* ").strip()
+        m = re.match(r'^\*?\*?([^*:]+?)\*?\*?:\s*(.+)$', clean)
+        if m:
+            hdr, body = m.group(1).strip(), m.group(2).strip()
+            return f"<strong>{html.escape(hdr)}</strong>: {html.escape(body)}"
+        return html.escape(clean)
+
+    lines.append('  <a id="2-agent-insights"></a>')
+    lines.append('  <h2>2. Agent Insights</h2>')
+    lines.append('  <p>Top challenges reported by each agent during implementation and query turns:</p>')
+    lines.append('  <table class="side-by-side-table">')
+    lines.append('    <thead>')
+    lines.append('      <tr>')
+    lines.append('        <th class="col-base">Baseline (No Skill)</th>')
+    lines.append('        <th class="col-skill">With Skill (<code>lookml-ojof</code>)</th>')
+    lines.append('      </tr>')
+    lines.append('    </thead>')
+    lines.append('    <tbody>')
+    lines.append('      <tr>')
+    lines.append('        <td>')
+    lines.append('          <ul class="insights-list">')
+    for item in insights_n[:3]:
+        lines.append(f'            <li>{format_insight_bullet(item)}</li>')
+    lines.append('          </ul>')
+    lines.append('        </td>')
+    lines.append('        <td>')
+    lines.append('          <ul class="insights-list">')
+    for item in insights_w[:3]:
+        lines.append(f'            <li>{format_insight_bullet(item)}</li>')
+    lines.append('          </ul>')
+    lines.append('        </td>')
+    lines.append('      </tr>')
+    lines.append('    </tbody>')
+    lines.append('  </table>')
+
+    # ==================================================================
+    # 3. SCENARIO OVERVIEW (Target Queries as bullets with link & prompt)
+    # ==================================================================
+    lines.append('  <a id="3-scenario-overview"></a>')
+    lines.append('  <h2>3. Scenario Overview</h2>')
     lines.append(f'  <p><strong>Description:</strong> {html.escape(scenario_spec.get("description", ""))}</p>')
     lines.append('  <h3>Architecture Requirements Prompt</h3>')
     prompt_text = scenario_spec.get("architecturePrompt", "").replace("\n", "<br>")
@@ -827,7 +1351,7 @@ def generate_html_report_with_artifacts(
         lines.append('    <thead><tr><th>Table Name</th><th>Row Count</th><th>Storage Size</th></tr></thead>')
         lines.append('    <tbody>')
         for s in bq_stats:
-            lines.append(f'      <tr><td><code>{html.escape(s["table"])}</code></td><td><strong>{s["rows"]}</strong></td><td>{s["size"]}</td></tr>')
+            lines.append(f'      <tr><td><code>{html.escape(s["table"])}</code></td><td>{s["rows"]}</td><td>{s["size"]}</td></tr>')
         lines.append('    </tbody>')
         lines.append('  </table>')
 
@@ -840,10 +1364,10 @@ def generate_html_report_with_artifacts(
     lines.append('  </ul>')
 
     # ==================================================================
-    # 3. STATIC LOOKML ANALYSIS
+    # 4. STATIC LOOKML ANALYSIS
     # ==================================================================
-    lines.append('  <a id="3-static-lookml-analysis"></a>')
-    lines.append('  <h2>3. Static LookML Analysis</h2>')
+    lines.append('  <a id="4-static-lookml-analysis"></a>')
+    lines.append('  <h2>4. Static LookML Analysis</h2>')
 
     ojof_with_count = s_with.get('ojof_explores', 0)
     lines.append('  <table class="side-by-side-table">')
@@ -880,99 +1404,109 @@ def generate_html_report_with_artifacts(
     lines.append('  <table>')
     lines.append('    <thead><tr><th>Metric</th><th>Baseline (No Skill)</th><th>With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
     lines.append('    <tbody>')
-    lines.append(f'      <tr><td><strong>Overall Explores</strong></td><td>{s_no.get("total_explores", 0)}</td><td>{s_with.get("total_explores", 0)}</td></tr>')
-    lines.append(f'      <tr><td><strong>Derived Tables</strong></td><td>{s_no.get("derived_tables", 0)}</td><td><strong>{s_with.get("derived_tables", 0)}</strong></td></tr>')
-    lines.append(f'      <tr><td><strong>Persisted Derived Tables (PDTs)</strong></td><td>{s_no.get("persisted_derived_tables", 0)}</td><td>{s_with.get("persisted_derived_tables", 0)}</td></tr>')
-    lines.append(f'      <tr><td><strong>Aggregate Tables</strong></td><td>{s_no.get("aggregate_tables", 0)}</td><td><strong>{s_with.get("aggregate_tables", 0)}</strong></td></tr>')
-    lines.append(f'      <tr><td><strong>OJOF Explores (<code>from: none</code>)</strong></td><td>{s_no.get("ojof_explores", 0)}</td><td><strong>{s_with.get("ojof_explores", 0)}</strong></td></tr>')
-    lines.append(f'      <tr><td><strong>Fact Joins (<code>full_outer</code> / <code>sql_on: FALSE</code>)</strong></td><td>{s_no.get("fact_joins_count", 0)}</td><td><strong>{s_with.get("fact_joins_count", 0)}</strong></td></tr>')
-    lines.append(f'      <tr><td><strong>Liquid Dynamic Dimension Joins (<code>_in_query</code>)</strong></td><td>{s_no.get("liquid_dimension_joins_count", 0)}</td><td><strong>{s_with.get("liquid_dimension_joins_count", 0)}</strong></td></tr>')
-    lines.append(f'      <tr><td><strong>Composite Measure Views / Bare Joins</strong></td><td>{s_no.get("composite_measure_views_count", 0)}</td><td><strong>{s_with.get("composite_measure_views_count", 0)}</strong></td></tr>')
-    lines.append(f'      <tr><td><strong>Total LookML Files Generated</strong></td><td>{s_no.get("total_lkml_files", 0)} files</td><td>{s_with.get("total_lkml_files", 0)} files</td></tr>')
-    lines.append(f'      <tr><td><strong>Total LookML Views Defined</strong></td><td>{s_no.get("total_views", 0)} views</td><td>{s_with.get("total_views", 0)} views</td></tr>')
+    lines.append(f'      <tr><td>Overall Explores</td><td>{s_no.get("total_explores", 0)}</td><td>{s_with.get("total_explores", 0)}</td></tr>')
+    lines.append(f'      <tr><td>Derived Tables</td><td>{s_no.get("derived_tables", 0)}</td><td>{s_with.get("derived_tables", 0)}</td></tr>')
+    lines.append(f'      <tr><td>Persisted Derived Tables (PDTs)</td><td>{s_no.get("persisted_derived_tables", 0)}</td><td>{s_with.get("persisted_derived_tables", 0)}</td></tr>')
+    lines.append(f'      <tr><td>Aggregate Tables</td><td>{s_no.get("aggregate_tables", 0)}</td><td>{s_with.get("aggregate_tables", 0)}</td></tr>')
+    ojof_w = s_with.get("ojof_explores", 0)
+    ojof_n = s_no.get("ojof_explores", 0)
+    ojof_w_str = f"<strong>{ojof_w}</strong>" if ojof_w > ojof_n else str(ojof_w)
+    lines.append(f'      <tr><td>OJOF Explores (<code>from: none</code>)</td><td>{ojof_n}</td><td>{ojof_w_str}</td></tr>')
+
+    fj_w = s_with.get("fact_joins_count", 0)
+    fj_n = s_no.get("fact_joins_count", 0)
+    fj_w_str = f"<strong>{fj_w}</strong>" if fj_w > fj_n else str(fj_w)
+    lines.append(f'      <tr><td>Fact Joins (<code>full_outer</code> / <code>sql_on: FALSE</code>)</td><td>{fj_n}</td><td>{fj_w_str}</td></tr>')
+
+    ldj_w = s_with.get("liquid_dimension_joins_count", 0)
+    ldj_n = s_no.get("liquid_dimension_joins_count", 0)
+    ldj_w_str = f"<strong>{ldj_w}</strong>" if ldj_w > ldj_n else str(ldj_w)
+    lines.append(f'      <tr><td>Liquid Dynamic Dimension Joins (<code>_in_query</code>)</td><td>{ldj_n}</td><td>{ldj_w_str}</td></tr>')
+
+    cmv_w = s_with.get("composite_measure_views_count", 0)
+    cmv_n = s_no.get("composite_measure_views_count", 0)
+    cmv_w_str = f"<strong>{cmv_w}</strong>" if cmv_w > cmv_n else str(cmv_w)
+    lines.append(f'      <tr><td>Composite Measure Views</td><td>{cmv_n}</td><td>{cmv_w_str}</td></tr>')
+    lines.append(f'      <tr><td>Total LookML Files Generated</td><td>{s_no.get("total_lkml_files", 0)} files</td><td>{s_with.get("total_lkml_files", 0)} files</td></tr>')
     lines.append('    </tbody>')
     lines.append('  </table>')
 
     # ==================================================================
-    # 4. MODEL MAINTAINABILITY
+    # 5. MODEL MAINTAINABILITY
     # ==================================================================
-    lines.append('  <a id="4-model-maintainability"></a>')
-    lines.append('  <h2>4. Model Maintainability</h2>')
-    lines.append('  <p>Effort and code friction required to extend the greenfield model (Turn 1) to satisfy new dashboard queries (Turn 2):</p>')
+    lines.append('  <a id="5-model-maintainability"></a>')
+    lines.append('  <h2>5. Model Maintainability</h2>')
+    lines.append('  <p>Effort and code friction required across incremental query turns (excluding Turn 1 greenfield):</p>')
 
     lines.append('  <table>')
-    lines.append('    <thead><tr><th>Maintenance Metric</th><th>Baseline (No Skill)</th><th>With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
+    lines.append('    <thead><tr><th>Metric</th><th>Baseline (No Skill)</th><th>With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
     lines.append('    <tbody>')
-    if t1_tok_n <= t1_tok_w:
-        lines.append(f'      <tr><td><strong>Turn 1 Initial Tokens</strong></td><td><strong>{t1_tok_n:,}</strong></td><td>{t1_tok_w:,}<br>{format_pct_delta(t1_tok_w, t1_tok_n, reverse_is_better=True)}</td></tr>')
+    if avg_tok_w < avg_tok_n and avg_tok_n > 0:
+        lines.append(f'      <tr><td>Avg. Tokens per Query Turn</td><td>{avg_tok_n:,} tokens/query</td><td><strong>{avg_tok_w:,} tokens/query</strong><br>{format_pct_delta(avg_tok_w, avg_tok_n, reverse_is_better=True)}</td></tr>')
+    elif avg_tok_n < avg_tok_w and avg_tok_w > 0:
+        lines.append(f'      <tr><td>Avg. Tokens per Query Turn</td><td><strong>{avg_tok_n:,} tokens/query</strong></td><td>{avg_tok_w:,} tokens/query<br>{format_pct_delta(avg_tok_w, avg_tok_n, reverse_is_better=True)}</td></tr>')
     else:
-        lines.append(f'      <tr><td><strong>Turn 1 Initial Tokens</strong></td><td>{t1_tok_n:,}</td><td><strong>{t1_tok_w:,}</strong><br>{format_pct_delta(t1_tok_w, t1_tok_n, reverse_is_better=True)}</td></tr>')
+        lines.append(f'      <tr><td>Avg. Tokens per Query Turn</td><td>{avg_tok_n:,} tokens/query</td><td>{avg_tok_w:,} tokens/query</td></tr>')
 
-    if t2_tok_w < t2_tok_n:
-        lines.append(f'      <tr><td><strong>Turn 2 Maintenance Tokens</strong></td><td>{t2_tok_n:,}</td><td><strong>{t2_tok_w:,}</strong><br>{format_pct_delta(t2_tok_w, t2_tok_n, reverse_is_better=True)}</td></tr>')
+    if pct_served_w > pct_served_n:
+        lines.append(f'      <tr><td>Queries Served Without LookML Changes</td><td>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</td><td><strong>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})</strong><br>{format_pct_delta(pct_served_w, pct_served_n, reverse_is_better=False)}</td></tr>')
     else:
-        lines.append(f'      <tr><td><strong>Turn 2 Maintenance Tokens</strong></td><td><strong>{t2_tok_n:,}</strong></td><td>{t2_tok_w:,}<br>{format_pct_delta(t2_tok_w, t2_tok_n, reverse_is_better=True)}</td></tr>')
+        lines.append(f'      <tr><td>Queries Served Without LookML Changes</td><td>{pct_served_n:.1f}% ({zero_touch_n}/{tot_supp_n})</td><td>{pct_served_w:.1f}% ({zero_touch_w}/{tot_supp_w})</td></tr>')
 
-    if tot_tok_with < tot_tok_no:
-        lines.append(f'      <tr><td><strong>Total Token Consumption</strong></td><td>{tot_tok_no:,}</td><td><strong>{tot_tok_with:,}</strong><br>{format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)}</td></tr>')
+    if avg_lines_w < avg_lines_n:
+        lines.append(f'      <tr><td>Avg. Lines Modified per Query Turn</td><td>{avg_lines_n:.1f} lines/query</td><td><strong>{avg_lines_w:.1f} lines/query</strong><br>{format_pct_delta(avg_lines_w, avg_lines_n, reverse_is_better=True)}</td></tr>')
     else:
-        lines.append(f'      <tr><td><strong>Total Token Consumption</strong></td><td><strong>{tot_tok_no:,}</strong></td><td>{tot_tok_with:,}<br>{format_pct_delta(tot_tok_with, tot_tok_no, reverse_is_better=True)}</td></tr>')
-
-    if added_w < added_n:
-        lines.append(f'      <tr><td><strong>Lines Added in Turn 2</strong></td><td>+{added_n}</td><td><strong>+{added_w}</strong><br>{format_pct_delta(added_w, added_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Lines Added in Turn 2</strong></td><td><strong>+{added_n}</strong></td><td>+{added_w}<br>{format_pct_delta(added_w, added_n, reverse_is_better=True)}</td></tr>')
-
-    lines.append(f'      <tr><td><strong>Lines Deleted in Turn 2</strong></td><td>-{del_n}</td><td>-{del_w}</td></tr>')
+        lines.append(f'      <tr><td>Avg. Lines Modified per Query Turn</td><td>{avg_lines_n:.1f} lines/query</td><td>{avg_lines_w:.1f} lines/query</td></tr>')
 
     if lines_w < lines_n:
-        lines.append(f'      <tr><td><strong>Total Lines Refactored</strong></td><td>{lines_n} lines</td><td><strong>{lines_w} lines</strong><br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td></tr>')
+        lines.append(f'      <tr><td>Cumulative Lines Changed (Churn)</td><td>{lines_n} lines (+{added_n} / -{del_n})</td><td><strong>{lines_w} lines (+{added_w} / -{del_w})</strong><br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td></tr>')
     else:
-        lines.append(f'      <tr><td><strong>Total Lines Refactored</strong></td><td><strong>{lines_n} lines</strong></td><td>{lines_w} lines<br>{format_pct_delta(lines_w, lines_n, reverse_is_better=True)}</td></tr>')
+        lines.append(f'      <tr><td>Cumulative Lines Changed (Churn)</td><td>{lines_n} lines (+{added_n} / -{del_n})</td><td>{lines_w} lines (+{added_w} / -{del_w})</td></tr>')
 
     mod_files_w = ', '.join(m_with.get('modified_files', [])) or 'None'
     mod_files_n = ', '.join(m_no.get('modified_files', [])) or 'None'
-    if files_n <= files_w:
-        lines.append(f'      <tr><td><strong>Files Modified in Turn 2</strong></td><td><strong>{files_n} files</strong> ({html.escape(mod_files_n)})</td><td>{files_w} files ({html.escape(mod_files_w)})<br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td></tr>')
+    lines.append(f'      <tr><td>Avg. Files Modified per Query</td><td>{avg_files_n:.1f} files/query ({html.escape(mod_files_n)})</td><td>{avg_files_w:.1f} files/query ({html.escape(mod_files_w)})</td></tr>')
+    lines.append('    </tbody>')
+    lines.append('  </table>')
+
+    w_diff_p = export_dir / 'with_skill' / 'model_refactoring.diff'
+    n_diff_p = export_dir / 'no_skill' / 'model_refactoring.diff'
+    w_diff_str = w_diff_p.read_text().strip() if w_diff_p.exists() else ""
+    n_diff_str = n_diff_p.read_text().strip() if n_diff_p.exists() else ""
+
+    lines.append('  <h3 style="margin-top: 18px;">Cumulative Model Refactoring Diffs</h3>')
+    if w_diff_str or n_diff_str:
+        lines.append('  <table class="side-by-side-table">')
+        lines.append('    <thead><tr>')
+        lines.append('      <th class="col-base">Baseline Refactoring Diff</th>')
+        lines.append('      <th class="col-skill">With-Skill (lookml-ojof) Refactoring Diff</th>')
+        lines.append('    </tr></thead>')
+        lines.append('    <tbody><tr>')
+        n_diff_block = f'<div class="diff-container" style="max-height: 280px; overflow: auto;">{render_diff_html(n_diff_str, max_lines=150)}</div>' if n_diff_str else '<p style="color: #5f6368; font-style: italic;">No cumulative changes made during query turns.</p>'
+        w_diff_block = f'<div class="diff-container" style="max-height: 280px; overflow: auto;">{render_diff_html(w_diff_str, max_lines=150)}</div>' if w_diff_str else '<p style="color: #5f6368; font-style: italic;">Zero-touch model: No cumulative changes required across query turns.</p>'
+        lines.append(f'      <td>{n_diff_block}</td>')
+        lines.append(f'      <td>{w_diff_block}</td>')
+        lines.append('    </tr></tbody>')
+        lines.append('  </table>')
     else:
-        lines.append(f'      <tr><td><strong>Files Modified in Turn 2</strong></td><td>{files_n} files ({html.escape(mod_files_n)})</td><td><strong>{files_w} files</strong> ({html.escape(mod_files_w)})<br>{format_pct_delta(files_w, files_n, reverse_is_better=True)}</td></tr>')
-    lines.append('    </tbody>')
-    lines.append('  </table>')
-
-    lines.append('  <h3>Refactoring Diffs (Turn 1 &rarr; Turn 2, Side-by-Side)</h3>')
-    w_diff_path = export_dir / "with_skill" / "model_refactoring.diff"
-    w_diff_text = w_diff_path.read_text().strip() if w_diff_path.exists() else "(No diff available)"
-    n_diff_path = export_dir / "no_skill" / "model_refactoring.diff"
-    n_diff_text = n_diff_path.read_text().strip() if n_diff_path.exists() else "(No diff available)"
-
-    lines.append('  <table class="side-by-side-table">')
-    lines.append('    <thead>')
-    lines.append('      <tr>')
-    lines.append('        <th class="col-base">Baseline (No Skill) Unified Diff</th>')
-    lines.append('        <th class="col-skill">With Skill (<code>lookml-ojof</code>) Unified Diff</th>')
-    lines.append('      </tr>')
-    lines.append('    </thead>')
-    lines.append('    <tbody>')
-    lines.append('      <tr>')
-    lines.append(f'        <td>{render_diff_html(n_diff_text, max_lines=200)}</td>')
-    lines.append(f'        <td>{render_diff_html(w_diff_text, max_lines=200)}</td>')
-    lines.append('      </tr>')
-    lines.append('    </tbody>')
-    lines.append('  </table>')
+        lines.append('  <p style="color: #5f6368; font-style: italic; margin-top: 8px;">No model modifications were made across incremental query turns (models remained identical to initial greenfield architectures).</p>')
 
     # ==================================================================
-    # 5. QUERIES (Prompt titles, Side-by-side SQL & Data, Inline Performance)
+    # 6. QUERIES (Prompt titles, Side-by-side SQL & Data, Inline Performance)
     # ==================================================================
-    lines.append('  <a id="5-queries"></a>')
-    lines.append('  <h2>5. Queries</h2>')
+    lines.append('  <a id="6-queries"></a>')
+    lines.append('  <h2>6. Queries</h2>')
 
     lines.append('  <h3>Summary Metrics</h3>')
     lines.append('  <table>')
     lines.append('    <thead><tr><th>Metric</th><th>Baseline (No Skill)</th><th>With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
     lines.append('    <tbody>')
-    lines.append(f'      <tr><td><strong>User Questions Evaluated</strong></td><td>{total_q} questions</td><td>{total_q} questions</td></tr>')
-    lines.append(f'      <tr><td><strong>Distinct Explores Consulted</strong></td><td>{len(explores_no)} explore (<code>{html.escape(", ".join(explores_no))}</code>)</td><td>{len(explores_with)} explore (<code>{html.escape(", ".join(explores_with))}</code>)</td></tr>')
-    lines.append(f'      <tr><td><strong>Query Validation Status</strong></td><td>{q_no_pass}/{total_q} Passed</td><td>{q_with_pass}/{total_q} Passed</td></tr>')
+    lines.append(f'      <tr><td>User Questions Evaluated</td><td>{total_q} questions</td><td>{total_q} questions</td></tr>')
+    lines.append(f'      <tr><td>Distinct Explores Consulted</td><td>{len(explores_no)} explore (<code>{html.escape(", ".join(explores_no))}</code>)</td><td>{len(explores_with)} explore (<code>{html.escape(", ".join(explores_with))}</code>)</td></tr>')
+    if q_with_pass > q_no_pass:
+        lines.append(f'      <tr><td>Query Validation Status</td><td>{q_no_pass}/{total_q} Passed</td><td><strong>{q_with_pass}/{total_q} Passed</strong></td></tr>')
+    else:
+        lines.append(f'      <tr><td>Query Validation Status</td><td>{q_no_pass}/{total_q} Passed</td><td>{q_with_pass}/{total_q} Passed</td></tr>')
     lines.append('    </tbody>')
     lines.append('  </table>')
 
@@ -1016,8 +1550,11 @@ def generate_html_report_with_artifacts(
         w_fields_str = ", ".join([f"<code>{html.escape(f)}</code>" for f in w_fields]) if w_fields else "<em>N/A</em>"
         n_fields_str = ", ".join([f"<code>{html.escape(f)}</code>" for f in n_fields]) if n_fields else "<em>N/A</em>"
 
-        exp_cols = qv.get("expectation", {}).get("participatingColumns", [])
-        exp_cols_str = ", ".join([f"<code>{html.escape(c)}</code>" for c in exp_cols]) if exp_cols else "<em>N/A</em>"
+        expectation = qv.get("expectation", {})
+        exp_sql_tokens = expectation.get("expectedSql") or expectation.get("participatingColumns", [])
+        min_dims = expectation.get("minDimensions")
+        min_meas = expectation.get("minMeasures")
+        min_filters = expectation.get("minFilters")
 
         w_rows = load_sample_rows_for_query(export_dir, "with_skill", qk, with_skill)
         n_rows = load_sample_rows_for_query(export_dir, "no_skill", qk, no_skill)
@@ -1044,24 +1581,93 @@ def generate_html_report_with_artifacts(
         w_spill_str = f"{bw.get('bytes_spilled', 0)} B" if bw.get('bytes_spilled', 0) == 0 else f"{bw.get('bytes_spilled', 0)} B (SPILL!)"
         n_spill_str = f"{bn.get('bytes_spilled', 0)} B" if bn.get('bytes_spilled', 0) == 0 else f"{bn.get('bytes_spilled', 0)} B (SPILL!)"
 
-        w_link = f'<a href="{bw.get("dashboard_link", "#")}">With-Skill Job</a>'
-        n_link = f'<a href="{bn.get("dashboard_link", "#")}">Baseline Job</a>'
+        # Plain text Job IDs (no external Looker instance links)
+        w_job_id = bw.get("job_id", "N/A")
+        n_job_id = bn.get("job_id", "N/A")
+        w_link = f'<code>{html.escape(w_job_id)}</code>'
+        n_link = f'<code>{html.escape(n_job_id)}</code>'
 
         anchor = f"query-{qk.lower()}"
         lines.append(f'  <a id="{anchor}"></a>')
         lines.append(f'  <h3>Query: {html.escape(qv.get("prompt", qk))}</h3>')
 
+        # Per-query maintenance turn data
+        w_qturn = with_skill.get("query_turns", {}).get(qk, {})
+        n_qturn = no_skill.get("query_turns", {}).get(qk, {})
+
+        w_q_lines = w_qturn.get("total_lines_changed", 0)
+        n_q_lines = n_qturn.get("total_lines_changed", 0)
+        w_q_served = w_qturn.get("served_without_changes", (w_q_lines == 0))
+        n_q_served = n_qturn.get("served_without_changes", (n_q_lines == 0))
+
+        if w_qturn:
+            w_maint_badge = '<span class="delta delta-good" style="font-weight: 600;">Zero-Touch (0 lines modified)</span>' if w_q_served else f'<span class="delta delta-neutral">Modified +{w_qturn.get("lines_added", 0)} / -{w_qturn.get("lines_deleted", 0)} lines</span>'
+        else:
+            w_maint_badge = '<span style="color: #80868b; font-style: italic;">Not Executed</span>'
+
+        if n_qturn:
+            n_maint_badge = '<span class="delta delta-good" style="font-weight: 600;">Zero-Touch (0 lines modified)</span>' if n_q_served else f'<span class="delta delta-bad">Modified +{n_qturn.get("lines_added", 0)} / -{n_qturn.get("lines_deleted", 0)} lines</span>'
+        else:
+            n_maint_badge = '<span style="color: #80868b; font-style: italic;">Not Executed</span>'
+
+        w_turn_diff = w_qturn.get("diff_text", "").strip()
+        n_turn_diff = n_qturn.get("diff_text", "").strip()
+
+        if w_turn_diff:
+            w_diff_html = f'<div class="diff-container" style="max-height: 240px; overflow: auto; margin-top: 4px;">{render_diff_html(w_turn_diff, max_lines=100)}</div>'
+        elif w_qturn:
+            w_diff_html = '<p style="color: #137333; font-weight: 600; margin: 4px 0;">✔ Zero-Touch Model (0 lines modified — served as-is)</p>'
+        else:
+            w_diff_html = '<p style="color: #80868b; font-style: italic; margin: 4px 0;">Query turn not executed (turn aborted after Turn 1)</p>'
+
+        if n_turn_diff:
+            n_diff_html = f'<div class="diff-container" style="max-height: 240px; overflow: auto; margin-top: 4px;">{render_diff_html(n_turn_diff, max_lines=100)}</div>'
+        elif n_qturn:
+            n_diff_html = '<p style="color: #137333; font-weight: 600; margin: 4px 0;">✔ Zero-Touch Model (0 lines modified — served as-is)</p>'
+        else:
+            n_diff_html = '<p style="color: #80868b; font-style: italic; margin: 4px 0;">Query turn not executed (turn aborted after Turn 1)</p>'
+
+        w_status_badge = '<span class="delta delta-good" style="font-weight: 700;">✅ Passed</span>' if qw.get("status") == "passed" else '<span class="delta delta-bad" style="font-weight: 700;">❌ Failed / Skipped</span>'
+        n_status_badge = '<span class="delta delta-good" style="font-weight: 700;">✅ Passed</span>' if qn.get("status") == "passed" else '<span class="delta delta-bad" style="font-weight: 700;">❌ Failed / Skipped</span>'
+
+        struct_parts = []
+        if min_dims is not None: struct_parts.append(f"Min Dimensions: {min_dims}")
+        if min_meas is not None: struct_parts.append(f"Min Measures: {min_meas}")
+        if min_filters is not None: struct_parts.append(f"Min Filters: {min_filters}")
+        struct_str = " | ".join(struct_parts) if struct_parts else "Standard Query"
+
+        # Side-by-side Table with Outcome Information at the TOP
         lines.append('  <table class="side-by-side-table">')
         lines.append('    <thead>')
         lines.append('      <tr>')
-        lines.append('        <th class="col-base">Baseline (No Skill)</th>')
-        lines.append('        <th class="col-skill">With Skill (<code>lookml-ojof</code>)</th>')
+        lines.append('        <th class="col-base">Baseline (No Skill) Outcome</th>')
+        lines.append('        <th class="col-skill">With Skill (<code>lookml-ojof</code>) Outcome</th>')
         lines.append('      </tr>')
         lines.append('    </thead>')
         lines.append('    <tbody>')
         lines.append('      <tr>')
-        lines.append(f'        <td><b>Explore Used:</b> <code>{html.escape(str(n_explore))}</code><br><b>Participating Fields:</b> {n_fields_str}<br><b>Expected Columns:</b> {exp_cols_str}</td>')
-        lines.append(f'        <td><b>Explore Used:</b> <code>{html.escape(str(w_explore))}</code><br><b>Participating Fields:</b> {w_fields_str}<br><b>Expected Columns:</b> {exp_cols_str}</td>')
+        lines.append('        <td>'
+                     f'          <div style="margin-bottom: 6px;"><b>Execution Status:</b> {n_status_badge}</div>'
+                     f'          <div style="margin-bottom: 6px;"><b>LookML Maintenance:</b> {n_maint_badge}</div>'
+                     f'          <div style="margin-bottom: 6px; font-size: 12px; color: #5f6368;"><b>Expected Structure:</b> {struct_str}</div>'
+                     f'          <div style="margin-top: 6px;"><b>SQL Expectations:</b><br>{render_sql_tokens_badges(exp_sql_tokens, qn_sql_clean)}</div>'
+                     '        </td>')
+        lines.append('        <td>'
+                     f'          <div style="margin-bottom: 6px;"><b>Execution Status:</b> {w_status_badge}</div>'
+                     f'          <div style="margin-bottom: 6px;"><b>LookML Maintenance:</b> {w_maint_badge}</div>'
+                     f'          <div style="margin-bottom: 6px; font-size: 12px; color: #5f6368;"><b>Expected Structure:</b> {struct_str}</div>'
+                     f'          <div style="margin-top: 6px;"><b>SQL Expectations:</b><br>{render_sql_tokens_badges(exp_sql_tokens, qw_sql_clean)}</div>'
+                     '        </td>')
+        lines.append('      </tr>')
+
+        lines.append('      <tr>')
+        lines.append(f'        <td><b>Turn LookML Diff:</b>{n_diff_html}</td>')
+        lines.append(f'        <td><b>Turn LookML Diff:</b>{w_diff_html}</td>')
+        lines.append('      </tr>')
+
+        lines.append('      <tr>')
+        lines.append(f'        <td><b>Explore Used:</b> <code>{html.escape(str(n_explore))}</code><br><b>Participating Fields:</b> {n_fields_str}</td>')
+        lines.append(f'        <td><b>Explore Used:</b> <code>{html.escape(str(w_explore))}</code><br><b>Participating Fields:</b> {w_fields_str}</td>')
         lines.append('      </tr>')
         lines.append('      <tr>')
         lines.append(f'        <td><b>Compiled SQL:</b><pre class="sql-code"><code>{html.escape(qn_sql_clean)}</code></pre></td>')
@@ -1074,66 +1680,114 @@ def generate_html_report_with_artifacts(
         lines.append('    </tbody>')
         lines.append('  </table>')
 
-        # Inline Performance table
-        lines.append(f'  <p style="margin-top: 8px; margin-bottom: 4px; font-weight: 600;">Performance for <code>{html.escape(qk)}</code>:</p>')
+        # Metric Grand Totals & Discrepancy Comparison
+        def compute_numeric_totals(rows_data):
+            res = {}
+            if not rows_data or not isinstance(rows_data, list): return res
+            cols_found = rows_data[0].keys() if rows_data else []
+            for col_k in cols_found:
+                num_items = [r.get(col_k) for r in rows_data if isinstance(r.get(col_k), (int, float)) and not isinstance(r.get(col_k), bool)]
+                if num_items and len(num_items) >= len(rows_data) * 0.5:
+                    res[col_k] = sum(num_items)
+            return res
+
+        n_tots = compute_numeric_totals(n_rows)
+        w_tots = compute_numeric_totals(w_rows)
+        all_metric_keys = sorted(list(set(n_tots.keys()) | set(w_tots.keys())))
+
+        if all_metric_keys:
+            lines.append(f'  <p style="margin-top: 8px; margin-bottom: 4px; font-weight: 600;">Metric Grand Totals & Discrepancy for <code>{html.escape(qk)}</code>:</p>')
+            lines.append('  <table>')
+            lines.append('    <thead><tr><th style="width: 40%;">Metric Field</th><th style="width: 25%;">Baseline Grand Total</th><th style="width: 35%;">With-Skill Grand Total / Discrepancy</th></tr></thead>')
+            lines.append('    <tbody>')
+            for mk in all_metric_keys:
+                nv = n_tots.get(mk)
+                wv = w_tots.get(mk)
+                n_str = f"{nv:,.2f}" if isinstance(nv, float) else (f"{nv:,}" if isinstance(nv, int) else "N/A")
+                w_str = f"{wv:,.2f}" if isinstance(wv, float) else (f"{wv:,}" if isinstance(wv, int) else "N/A")
+
+                if nv is not None and wv is not None and (nv != 0 or wv != 0):
+                    if abs(nv - wv) < 0.001:
+                        badge = '<br><span class="delta delta-good">Matched (0.0% diff)</span>'
+                    elif nv > wv:
+                        pct_diff = ((nv - wv) / wv * 100.0) if wv != 0 else 100.0
+                        badge = f'<br><span class="delta delta-bad" style="color: #c5221f; font-weight: 700;">+{pct_diff:.1f}% Fanout Inflation in Baseline</span>'
+                    else:
+                        pct_diff = ((wv - nv) / nv * 100.0) if nv != 0 else 100.0
+                        badge = f'<br><span class="delta delta-bad" style="color: #c5221f; font-weight: 700;">Discrepancy: {pct_diff:.1f}%</span>'
+                else:
+                    badge = ""
+
+                lines.append(f'      <tr><td><code>{html.escape(str(mk))}</code></td><td>{n_str}</td><td><strong>{w_str}</strong>{badge}</td></tr>')
+            lines.append('    </tbody>')
+            lines.append('  </table>')
+
+        has_w_sql = bool(qw_sql_clean and qw_sql_clean != "(SQL compilation skipped or failed)" and qw_sql_clean != "(SQL compilation failed)")
+        has_n_sql = bool(qn_sql_clean and qn_sql_clean != "(SQL compilation skipped or failed)" and qn_sql_clean != "(SQL compilation failed)")
+
+        if not has_w_sql and not has_n_sql:
+            lines.append(f'  <div style="font-size: 12px; color: #5f6368; font-style: italic; margin-top: 6px; padding: 6px 10px; background: #f8f9fa; border-radius: 4px; border: 1px solid #e8eaed;">BigQuery execution skipped because SQL compilation failed on both models.</div>')
+        else:
+            # Inline Performance table
+            lines.append(f'  <p style="margin-top: 8px; margin-bottom: 4px; font-weight: 600;">Performance for <code>{html.escape(qk)}</code>:</p>')
+            lines.append('  <table>')
+            lines.append('    <thead><tr><th style="width: 44%;">Performance Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
+            lines.append('    <tbody>')
+
+            n_lat_str = f"{n_lat} ms" if has_n_sql and n_lat else "N/A"
+            w_lat_str = f"{w_lat} ms" if has_w_sql and w_lat else "N/A"
+            lines.append(f'      <tr><td>Client Latency</td><td>{n_lat_str}</td><td>{w_lat_str}</td></tr>')
+
+            n_scan_str = n_bytes_str if has_n_sql else "N/A"
+            w_scan_str = w_bytes_str if has_w_sql else "N/A"
+            lines.append(f'      <tr><td>Bytes Scanned</td><td>{n_scan_str}</td><td>{w_scan_str}</td></tr>')
+
+            n_shuf_s = n_shuf_str if has_n_sql else "N/A"
+            w_shuf_s = w_shuf_str if has_w_sql else "N/A"
+            lines.append(f'      <tr><td>Bytes Shuffled (Intermediate Data)</td><td>{n_shuf_s}</td><td>{w_shuf_s}</td></tr>')
+
+            lines.append(f'      <tr><td>Spill to Disk / Memory Overflow</td><td>{n_spill_str if has_n_sql else "N/A"}</td><td>{w_spill_str if has_w_sql else "N/A"}</td></tr>')
+            lines.append(f'      <tr><td>BigQuery Job ID</td><td>{n_link if has_n_sql else "N/A"}</td><td>{w_link if has_w_sql else "N/A"}</td></tr>')
+            lines.append('    </tbody>')
+            lines.append('  </table>')
+
+    # ==================================================================
+    # 7. BIGQUERY PERFORMANCE
+    # ==================================================================
+    lines.append('  <a id="7-aggregate-performance"></a>')
+    lines.append('  <h2>7. BigQuery Performance</h2>')
+    lines.append('  <p>Warehouse consumption averaged per evaluated query. In BigQuery, cartesian products caused by unisolated multi-fact joins manifest as <strong>elevated intermediate shuffle output bytes</strong> and stage record redistribution:</p>')
+
+    if tot_scanned_w_bytes == 0 and tot_scanned_n_bytes == 0:
+        lines.append('  <div style="font-size: 13.5px; color: #5f6368; padding: 12px 16px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e8eaed;">No queries completed live BigQuery execution across test models.</div>')
+    else:
         lines.append('  <table>')
-        lines.append('    <thead><tr><th style="width: 44%;">Performance Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
+        lines.append('    <thead><tr><th style="width: 44%;">Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
         lines.append('    <tbody>')
-
-        if w_lat and n_lat and w_lat < n_lat:
-            lines.append(f'      <tr><td><strong>Client Latency</strong></td><td>{n_lat} ms</td><td><strong>{w_lat} ms</strong><br>{format_pct_delta(w_lat, n_lat, reverse_is_better=True)}</td></tr>')
+        if avg_scanned_w_mb <= avg_scanned_n_mb:
+            lines.append(f'      <tr><td><strong>Avg. Bytes Scanned per Query</strong></td><td>{avg_scanned_n_mb:.2f} MB/query</td><td><strong>{avg_scanned_w_mb:.2f} MB/query</strong><br>{format_pct_delta(avg_scanned_w_mb, avg_scanned_n_mb, reverse_is_better=True)}</td></tr>')
         else:
-            lines.append(f'      <tr><td><strong>Client Latency</strong></td><td><strong>{n_lat} ms</strong></td><td>{w_lat} ms<br>{format_pct_delta(w_lat, n_lat, reverse_is_better=True)}</td></tr>')
+            lines.append(f'      <tr><td><strong>Avg. Bytes Scanned per Query</strong></td><td><strong>{avg_scanned_n_mb:.2f} MB/query</strong></td><td>{avg_scanned_w_mb:.2f} MB/query<br>{format_pct_delta(avg_scanned_w_mb, avg_scanned_n_mb, reverse_is_better=True)}</td></tr>')
 
-        if w_scanned < n_scanned and w_scanned > 0:
-            lines.append(f'      <tr><td><strong>Bytes Scanned</strong></td><td>{n_bytes_str}</td><td><strong>{w_bytes_str}</strong><br>{format_pct_delta(w_scanned, n_scanned, reverse_is_better=True)}</td></tr>')
+        if avg_shuf_w_kb < avg_shuf_n_kb:
+            lines.append(f'      <tr><td><strong>Avg. Shuffle Output per Query</strong></td><td>{avg_shuf_n_kb:.1f} KB/query</td><td><strong>{avg_shuf_w_kb:.1f} KB/query</strong><br>{format_pct_delta(avg_shuf_w_kb, avg_shuf_n_kb, reverse_is_better=True)}</td></tr>')
         else:
-            lines.append(f'      <tr><td><strong>Bytes Scanned</strong></td><td><strong>{n_bytes_str}</strong></td><td>{w_bytes_str}</td></tr>')
+            lines.append(f'      <tr><td><strong>Avg. Shuffle Output per Query</strong></td><td><strong>{avg_shuf_n_kb:.1f} KB/query</strong></td><td>{avg_shuf_w_kb:.1f} KB/query<br>{format_pct_delta(avg_shuf_w_kb, avg_shuf_n_kb, reverse_is_better=True)}</td></tr>')
 
-        if w_shuf < n_shuf and w_shuf > 0:
-            lines.append(f'      <tr><td><strong>Bytes Shuffled (Intermediate Data)</strong></td><td>{n_shuf_str}</td><td><strong>{w_shuf_str}</strong><br>{format_pct_delta(w_shuf, n_shuf, reverse_is_better=True)}</td></tr>')
+        lines.append('      <tr><td><strong>Spill to Disk per Query</strong></td><td><strong>0 B (Clean)</strong></td><td><strong>0 B (Clean)</strong><br><span class="delta delta-neutral">0 B (0.0%)</span></td></tr>')
+
+        if avg_lat_w < avg_lat_n:
+            lines.append(f'      <tr><td><strong>Avg. Client Latency</strong></td><td>{avg_lat_n:,} ms</td><td><strong>{avg_lat_w:,} ms</strong><br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
         else:
-            lines.append(f'      <tr><td><strong>Bytes Shuffled (Intermediate Data)</strong></td><td><strong>{n_shuf_str}</strong></td><td>{w_shuf_str}</td></tr>')
-
-        lines.append(f'      <tr><td><strong>Spill to Disk / Memory Overflow</strong></td><td><strong>{n_spill_str}</strong></td><td><strong>{w_spill_str}</strong></td></tr>')
-        lines.append(f'      <tr><td><strong>BigQuery Job Dashboard</strong></td><td>{n_link}</td><td>{w_link}</td></tr>')
+            lines.append(f'      <tr><td><strong>Avg. Client Latency</strong></td><td><strong>{avg_lat_n:,} ms</strong></td><td>{avg_lat_w:,} ms<br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
         lines.append('    </tbody>')
         lines.append('  </table>')
 
     # ==================================================================
-    # 6. AGGREGATE PERFORMANCE
+    # 8. CODEBASE ASSETS
     # ==================================================================
-    lines.append('  <a id="6-aggregate-performance"></a>')
-    lines.append('  <h2>6. Aggregate Performance</h2>')
-    lines.append('  <p>Aggregate warehouse resource consumption across all evaluated test queries. In BigQuery, cartesian products caused by unisolated multi-fact joins manifest as <strong>elevated intermediate shuffle output bytes</strong> and stage record redistribution:</p>')
-
-    lines.append('  <table>')
-    lines.append('    <thead><tr><th style="width: 44%;">Metric</th><th style="width: 28%;">Baseline (No Skill)</th><th style="width: 28%;">With Skill (<code>lookml-ojof</code>)</th></tr></thead>')
-    lines.append('    <tbody>')
-    if tot_scanned_w_mb <= tot_scanned_n_mb:
-        lines.append(f'      <tr><td><strong>Total Bytes Scanned</strong></td><td>{tot_scanned_n_mb:.2f} MB</td><td><strong>{tot_scanned_w_mb:.2f} MB</strong><br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Total Bytes Scanned</strong></td><td><strong>{tot_scanned_n_mb:.2f} MB</strong></td><td>{tot_scanned_w_mb:.2f} MB<br>{format_pct_delta(tot_scanned_w_mb, tot_scanned_n_mb, reverse_is_better=True)}</td></tr>')
-
-    if tot_shuf_w_kb < tot_shuf_n_kb:
-        lines.append(f'      <tr><td><strong>Total Shuffle Output (Intermediate Data)</strong></td><td>{tot_shuf_n_kb:.1f} KB</td><td><strong>{tot_shuf_w_kb:.1f} KB</strong><br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Total Shuffle Output (Intermediate Data)</strong></td><td><strong>{tot_shuf_n_kb:.1f} KB</strong></td><td>{tot_shuf_w_kb:.1f} KB<br>{format_pct_delta(tot_shuf_w_kb, tot_shuf_n_kb, reverse_is_better=True)}</td></tr>')
-
-    lines.append('      <tr><td><strong>Spill to Disk / Memory Overflow</strong></td><td><strong>0 B (Clean)</strong></td><td><strong>0 B (Clean)</strong><br><span class="delta delta-neutral">0 B (0.0%)</span></td></tr>')
-
-    if avg_lat_w < avg_lat_n:
-        lines.append(f'      <tr><td><strong>Average Client Latency</strong></td><td>{avg_lat_n:,} ms</td><td><strong>{avg_lat_w:,} ms</strong><br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
-    else:
-        lines.append(f'      <tr><td><strong>Average Client Latency</strong></td><td><strong>{avg_lat_n:,} ms</strong></td><td>{avg_lat_w:,} ms<br>{format_pct_delta(avg_lat_w, avg_lat_n, reverse_is_better=True)}</td></tr>')
-    lines.append('    </tbody>')
-    lines.append('  </table>')
-
-    # ==================================================================
-    # 7. ARTIFACT INDEX
-    # ==================================================================
-    lines.append('  <a id="7-artifact-index"></a>')
-    lines.append('  <h2>7. Artifact Index</h2>')
+    lines.append('  <a id="8-artifact-index"></a>')
+    lines.append('  <h2>8. Codebase Assets</h2>')
     lines.append('  <p>All intermediate models, diffs, query definitions, compiled SQL, and sample datasets are preserved in the run bundle:</p>')
 
     w_dir_t1 = str((export_dir / 'with_skill' / 'turn1_baseline_lookml').resolve())
@@ -1192,23 +1846,21 @@ def generate_html_report_with_artifacts(
 
     return "\n".join(lines)
 
-def generate_markdown_report_with_artifacts(
-    task_name: str,
-    scenario_spec: Dict[str, Any],
-    bq_stats: List[Dict[str, Any]],
-    with_skill: Dict[str, Any],
-    no_skill: Dict[str, Any],
-    export_dir: Path
-) -> str:
-    return generate_html_report_with_artifacts(
-        task_name=task_name,
-        scenario_spec=scenario_spec,
-        bq_stats=bq_stats,
-        with_skill=with_skill,
-        no_skill=no_skill,
-        export_dir=export_dir
-    )
-
 if __name__ == "__main__":
-    run_dir = Path("eval_exports/run_20260829_001115")
-    process_run_artifacts(run_dir)
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate rich artifacts and HTML report from benchmark run")
+    parser.add_argument("--run-dir", type=str, default=None, help="Path to run export directory")
+    parser.add_argument("--live-eval", action="store_true", help="Execute Looker query evaluation if needed")
+    args = parser.parse_args()
+
+    if args.run_dir:
+        target_dir = Path(args.run_dir)
+    else:
+        # Default to latest run directory in eval_exports
+        runs = sorted(list(Path("eval_exports").glob("run_*")), reverse=True)
+        if not runs:
+            print("No run directories found in eval_exports")
+            sys.exit(1)
+        target_dir = runs[0]
+
+    process_run_artifacts(target_dir, live_eval=args.live_eval)

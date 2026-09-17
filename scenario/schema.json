@@ -74,10 +74,22 @@
           "expectation": {
             "type": "object",
             "properties": {
-              "participatingColumns": {
+              "minDimensions": {
+                "type": "integer",
+                "description": "Minimum count of dimensions expected in the query."
+              },
+              "minMeasures": {
+                "type": "integer",
+                "description": "Minimum count of aggregate measures expected in the query."
+              },
+              "minFilters": {
+                "type": "integer",
+                "description": "Minimum count of filters expected in the query."
+              },
+              "expectedSql": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "List of physical database columns (table.column) expected in the compiled SQL."
+                "description": "List of SQL tokens, column references, or aggregate functions expected in the compiled SQL (e.g. ['order_items.sale_price', 'inventory_items.cost', 'SUM', 'GROUP BY'])."
               }
             }
           }

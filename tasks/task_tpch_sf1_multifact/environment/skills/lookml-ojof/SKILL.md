@@ -157,7 +157,8 @@ view: date {
     sql: ${TABLE} ;; #This resolves to the join alias, which is the lateral join expression
   }
 
-  # For use with partitioned columns, define a `date_filter` field from ONE of the two options below
+  # For use with partitioned columns, define a `date_filter` field from ONE of the two options below:
+  # Option A (Standard): As a filter
   filter: date_filter {
     label: "Date Limit"
     hidden: yes # For use with always_filter
@@ -166,13 +167,14 @@ view: date {
     # True if null, i.e. applied to a row with no date column
     sql: COALESCE({% condition %} ${TABLE} {% endcondition %}, TRUE) ;;
   }
-  dimension: date_filter {
-    label: "Date Limit"
-    hidden: yes # For use with always_filter
-    type: date
-    datatype: date
-    sql: ${TABLE} ;;
-  }
+  # Option B: As a dimension (ONLY if needed for aggregate awareness tables)
+  # dimension: date_filter {
+  #   label: "Date Limit"
+  #   hidden: yes
+  #   type: date
+  #   datatype: date
+  #   sql: ${TABLE} ;;
+  # }
 }
 ```
 
