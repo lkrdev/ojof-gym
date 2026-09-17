@@ -1,6 +1,6 @@
 # ojof-gym: Outer Join On False (OJOF) Evaluation Gym
 
-`ojof-gym` is an evaluation benchmark and gym designed to evaluate AI coding agents on designing, extending, and maintaining multi-fact LookML data models. In particular, it benchmarks whether agents apply **Outer Join On False (OJOF)** architectural patterns to eliminate cartesian fanout, preserve separate fact grains, and minimize code churn over incremental query requirements.
+`ojof-gym` is an evaluation benchmark and gym designed to evaluate and improve the `lookml-ojof` agentic SKILL for designing, extending, and maintaining multi-fact LookML data models. In particular, it benchmarks whether agents apply **Outer Join On False (OJOF)** architectural patterns, and whether these patterns allow for reduced model churn, lower token consumption, and more efficient database queries.
 
 ---
 
@@ -27,7 +27,7 @@ The benchmark executes a multi-turn evaluation comparing a **Baseline Agent (No 
 ```
 +-----------------------------------------------------------------------------------+
 | Turn 1: Greenfield Architecture                                                   |
-| - Agent is given schema metadata for BigQuery tables (e.g., TheLook eCommerce).    |
+| - Agent is given schema metadata for BigQuery tables (e.g., TheLook eCommerce).   |
 | - Prompts agent to design a multi-fact semantic model supporting diverse grains.  |
 +-----------------------------------------------------------------------------------+
                                          │
@@ -50,7 +50,7 @@ The benchmark executes a multi-turn evaluation comparing a **Baseline Agent (No 
 | Automated Verifiers & Metric Compilation                                          |
 | 1. Static Linter: Verifies zero-row base, full_outer / sql_on: FALSE, Liquid joins|
 | 2. Looker Project Validator: Tests syntax and compilation via Looker API.         |
-| 3. Target Query Verifier: Compiles & executes queries against BigQuery.          |
+| 3. Target Query Verifier: Compiles & executes queries against BigQuery.           |
 | 4. BQ Performance & Discrepancy: Compares byte scans, shuffle output, and fanout. |
 +-----------------------------------------------------------------------------------+
 ```
@@ -120,7 +120,7 @@ python3 eval/run_benchmark.py --task task_thelook_ecommerce
 
 ## 5. Report Generation & Instant Iteration
 
-The report generator is **completely decoupled** from live network calls, allowing sub-second visual edits and styling iterations.
+The report generator is decoupled from live network calls, allowing sub-second visual edits and styling iterations.
 
 ### Instant Local Rebuild (<2 seconds)
 Rebuilds HTML and Markdown reports from saved run artifacts on disk without hitting Looker or BigQuery:
@@ -160,32 +160,9 @@ The generated report (`thelook_ecommerce_evaluation_report.html`) contains:
 
 ---
 
-## 7. Spectacles CLI Commands
-
-You can also run standalone LookML and SQL checks with Spectacles:
-
-```bash
-# Test Looker API connection:
-spectacles connect
-
-# Validate LookML syntax:
-spectacles lookml
-
-# Validate SQL queries against the warehouse:
-spectacles sql
-
-# Run Looker data tests:
-spectacles assert
-```
-
----
-
-## 8. Production Deployment Workaround (Sandbox / Ephemeral Testing)
+## 7. Production Deployment Workaround (Sandbox / Ephemeral Testing)
 
 > [!NOTE]
-> **Temporary Workaround:** Enabling instance-level Looker feature flags (specifically `dev_mode_in_ca` for Conversational Analytics in developer workspaces) is an onerous process. Furthermore, on this dedicated testing/sandbox instance, there is only a single user running evaluations.
+> Since Conversational Analytics against development mode is not currently supported in Looker, the sandbox LookML project simply gets deployed to production frequently. As a result, make sure that the sandbox project is only used for one benchmarking user/process at any given time.
 >
-> To support queries against newly generated LookML without requiring `dev_mode_in_ca`, the evaluation harness automatically deploys the LookML project branch to production (`looker-cli project deploy <project_id>` / `POST /api/4.0/projects/{project_id}/deploy_to_production`) after each turn's LookML changes are validated and before preparing or executing queries.
->
-> When the upstream Looker product change supporting native development mode in Conversational Analytics (`dev_mode_in_ca`) or dev-scoped session queries becomes available on this instance, this production deployment workaround can be deprecated to make the evaluation pipeline more streamlined.
-
+> If/when Looker begins supporting development mode in Conversational Analytics, this production deployment workaround can be deprecated to make the evaluation pipeline more streamlined.
