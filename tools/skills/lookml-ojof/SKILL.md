@@ -176,7 +176,7 @@ view: date {
   - As a filter: `filter: date_filter {}` handles non-date related records in a way that is usually more intuitive for users
   - As a dimension: `dimension: date_filter {}` works inside aggregate awareness tables.
 
-# Rule 6: Views
+### Rule 6: Views
 
 Any measures of type `count` MUST also specifiy a not null filter on a non-nullable column from the table, usually the primary key, to prevent Looker from writing the SQL for the measure like `COUNT(*)`.
 
