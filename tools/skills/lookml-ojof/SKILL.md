@@ -15,13 +15,11 @@ When querying multiple independent fact tables with different grains (e.g. Sales
 
 The OJOF Pattern solves this by starting all queries from a 0-row dummy table. From there, all participating fact tables are outer joined on false, logically resulting in a "wide" or "diagonal" union of the fact data. Next, dimensions are joined onto any partipating fact tables to which they are relevant. Finally, GROUP BY clauses bring together the related rows from across the multiple tables:
 
-```
 |             | none | Fact A              | Fact B              | Fact C              | Dimension X (for A, B)    | Dimension Y (for A, C)     | Co-dimension (e.g., date) |
 |-------------|------|---------------------|---------------------|---------------------|---------------------------|----------------------------|---------------------------|
 | Rowset A    |      | (data)              | NULLs               | NULLs               | (data)                    | (data)                     | (projection)              |
 | Rowset B    |      | NULLs               | (data)              | NULLS               | (data)                    | NULLs                      | (projection)              |
 | Rowset C    |      | NULLs               | NULLs               | (data)              | NULLs                     | (data)                     | (projection)              |
-```
 
 ### Caveats and Assumptions
 
