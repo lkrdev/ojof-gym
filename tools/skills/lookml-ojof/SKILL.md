@@ -13,20 +13,14 @@ When querying multiple independent fact tables with different grains (e.g. Sales
 
 ### Solution
 
-The OJOF Pattern solves this by treating fact tables as parallel peers connected to a 0-row dummy table, dynamically binding shared dimensions and co-dimensions via Liquid.
+The OJOF Pattern solves this by starting all queries from a 0-row dummy table. From there, all participating fact tables are outer joined on false, logically resulting in a "wide" or "diagonal" union of the fact data. Next, dimensions are joined onto any partipating fact tables to which they are relevant. Finally, GROUP BY clauses bring together the related rows from across the multiple tables:
 
 ```
-       [ none (0 rows) ]
-       /       |       \
-FULL OUTER  FULL OUTER  FULL OUTER
-sql_on:FALSE sql_on:FALSE sql_on:FALSE
-    /          |          \
-[Fact A]   [Fact B]    [Fact C]
-    \          |          /
-     \         |         /
-      LEFT OUTER (Liquid COALESCE)
-               |
-      [Shared Dimension / Co-dim]
+|             | none | Fact A              | Fact B              | Fact C              | Dimension X (for A, B)    | Dimension Y (for A, C)     | Co-dimension (e.g., date) |
+|-------------|------|---------------------|---------------------|---------------------|---------------------------|----------------------------|---------------------------|
+| Rowset A    |      | (data)              | NULLs               | NULLs               | (data)                    | (data)                     | (projection)              |
+| Rowset B    |      | NULLs               | (data)              | NULLS               | (data)                    | NULLs                      | (projection)              |
+| Rowset C    |      | NULLs               | NULLs               | (data)              | NULLs                     | (data)                     | (projection)              |
 ```
 
 ### Caveats and Assumptions
@@ -152,25 +146,27 @@ view: date {
   label: "[Date]"
   dimension_group: _ {
     type: time
-    datatype: date
-    timeframes: [raw, date, week, month, quarter, year]
-    sql: ${TABLE} ;; #This resolves to the join alias, which is the lateral join expression
+    datatype: date # or timestamp
+    timeframes: [...]
+    sql: ${TABLE} ;; #This resolves to the join alias for the lateral join expression
   }
 
-  # For use with partitioned columns, define a `date_filter` field from ONE of the two options below
+  # For use with partitioned columns, define a `date_filter` field from **one** of the two options below
+  # Option A (preferred)
   filter: date_filter {
     label: "Date Limit"
     hidden: yes # For use with always_filter
-    type: date
-    datatype: date
+    type: date # or time
+    datatype: date # or timestamp
     # True if null, i.e. applied to a row with no date column
     sql: COALESCE({% condition %} ${TABLE} {% endcondition %}, TRUE) ;;
   }
+  # Option B (if required for aggregate awareness)
   dimension: date_filter {
     label: "Date Limit"
     hidden: yes # For use with always_filter
     type: date
-    datatype: date
+    datatype: date # or timestamp
     sql: ${TABLE} ;;
   }
 }
@@ -182,11 +178,15 @@ view: date {
   - As a filter: `filter: date_filter {}` handles non-date related records in a way that is usually more intuitive for users
   - As a dimension: `dimension: date_filter {}` works inside aggregate awareness tables.
 
+# Rule 6: Views
+
+Any measures of type `count` MUST also specifiy a not null filter on a non-nullable column from the table, usually the primary key, to prevent Looker from writing the SQL for the measure like `COUNT(*)`.
+
 ## 4. Additional Patterns 
 
 ### Filter Push-Down
 
-When partition columns are available, relevant filters should be pushed down in the query closer to the table:
+When partition columns are available, relevant filters SHOULD be pushed down in the query closer to the table:
 ```lookml
     sql_table_name: (
       SELECT * FROM table
@@ -210,6 +210,7 @@ In these cases, the table may be joined into the explore twice. The convention i
 view: users{
   set: dimensions { fields: [email,age,country] }
   set: measures { fields: [count,lifetime_order_value] }
+  # Field definitions continue...
 }
 explore: multi_fact {
   # Fact/measure joins
@@ -394,3 +395,4 @@ explore: orders_pop {
 - [ ] Every dimension join is `type: left_outer`, `relationship: many_to_one`, and `sql_on` uses `COALESCE` with `{% if <fact>._in_query %} join_alias.column_name {% endif %}`.
 - [ ] Every co-dimension join is `relationship: one_to_one` with `sql_table_name` like `UNNEST([COALESCE(<liquid conditional fields>)])`.
 - [ ] Ensure no join's sql_table_name attempts to refer to ${view_name.SQL_TABLE_NAME} where the join name and the view name are the same.
+- [ ] Ensure every participating measure of type `count` implements a "not null" filter on a non-nullable column from that table
