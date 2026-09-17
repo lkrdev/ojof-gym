@@ -205,7 +205,7 @@ A dimension table that applies to measures from other tables may also have measu
 In these cases, the table may be joined into the explore twice. The convention is to name the fact/measure join as a plural and the dimension join as singular. The join -> fields parameter should be used to expose measure fields from the fact/measure join and dimension fields from the dimension join. 
 
 ```lookml
-view: users{
+view: users {
   set: dimensions { fields: [email,age,country] }
   set: measures { fields: [count,lifetime_order_value] }
   # Field definitions continue...
@@ -225,6 +225,7 @@ explore: multi_fact {
   }
   # Dimension joins
   join: user {
+    from: users
     type: left_outer
     relationship: many_to_one
     fields: [dimensions*]
